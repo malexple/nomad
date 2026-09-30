@@ -6,11 +6,14 @@ import java.net.http.HttpClient;
 import java.net.http.WebSocket;
 import java.nio.charset.StandardCharsets;
 import java.security.KeyPair;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.nomad.client.CursorState;
@@ -21,9 +24,14 @@ import org.nomad.core.DeviceAuth;
 import org.nomad.core.Ids;
 import org.nomad.core.PrekeyBundle;
 import org.nomad.crypto.ConversationManager;
+import org.nomad.crypto.GroupManager;
 import org.nomad.crypto.Identity;
 
-/** One emulated user: own key, one WebSocket connection to one node, optional end-to-end encryption. */
+/**
+ * One emulated user: own key, one WebSocket connection to one node, optional end-to-end encryption and groups.
+ * All blocking work (prekey fetches, sends) runs on the user's own single io thread, never on the WebSocket
+ * listener thread, so the listener can always deliver the replies that the io thread is waiting for.
+ */
 final class SimUser implements WebSocket.Listener {
     final String name;
     final String url;
@@ -37,10 +45,13 @@ final class SimUser implements WebSocket.Listener {
     private final boolean encrypt;
     private final Identity identity;
     private final ConversationManager convo;
+    private final GroupManager groups;
+    private final ExecutorService io;
     private final ConcurrentHashMap<String, CompletableFuture<PrekeyBundle>> bundles = new ConcurrentHashMap<>();
     private final WsInbox inbox = new WsInbox(new CursorState());
     private final StringBuilder partial = new StringBuilder();
     private volatile WebSocket ws;
+    private long lastAcked;
     private CompletableFuture<?> tail = CompletableFuture.completedFuture(null);
 
     SimUser(String name, String url, Stats stats, boolean encrypt) {
@@ -50,6 +61,12 @@ final class SimUser implements WebSocket.Listener {
         this.encrypt = encrypt;
         this.identity = encrypt ? new Identity(keys) : null;
         this.convo = encrypt ? new ConversationManager(identity) : null;
+        this.groups = encrypt ? new GroupManager(identity) : null;
+        this.io = Executors.newSingleThreadExecutor(r -> {
+            Thread t = new Thread(r, "sim-io-" + name);
+            t.setDaemon(true);
+            return t;
+        });
         if (!encrypt) {
             published.complete(null);
         }
@@ -63,6 +80,14 @@ final class SimUser implements WebSocket.Listener {
         return Ids.mailboxIdFor(DeviceAuth.rawPublicKey(keys.getPublic()));
     }
 
+    GroupManager.GroupMember asMember() {
+        return new GroupManager.GroupMember(DeviceAuth.rawPublicKey(keys.getPublic()));
+    }
+
+    int heldCount() {
+        return inbox.heldCount();
+    }
+
     void connect(HttpClient http) {
         http.newWebSocketBuilder().buildAsync(URI.create(url), this).whenComplete((w, err) -> {
             if (err != null) {
@@ -71,22 +96,71 @@ final class SimUser implements WebSocket.Listener {
         });
     }
 
-    /** Sends one message; in encrypted mode the first message to a peer fetches its prekey bundle. */
-    void sendMessage(SimUser to, String payload) throws Exception {
-        byte[] data = payload.getBytes(StandardCharsets.UTF_8);
-        int version = 0;
-        if (encrypt) {
-            String peer = to.uid();
-            if (!convo.hasSession(peer)) {
-                PrekeyBundle bundle = fetchBundle(peer);
-                if (!convo.hasSession(peer)) {
-                    convo.startSession(peer, bundle);
+    // ------------------------------------------------------------------ sending (io thread)
+
+    CompletableFuture<Void> sendChat(SimUser to, int index) {
+        return CompletableFuture.runAsync(() -> {
+            try {
+                String text = "sim|" + name + "|" + to.name + "|" + index + "|" + System.currentTimeMillis();
+                byte[] data = text.getBytes(StandardCharsets.UTF_8);
+                if (!encrypt) {
+                    sendEnvelope(to.mailboxId(), 0, data);
+                    return;
                 }
+                sendPairwise(to.uid(), to.mailboxId(), prefixed(GroupManager.KIND_CHAT, data));
+            } catch (Exception e) {
+                failed("chat", e);
             }
-            data = convo.encryptFor(peer, data);
-            version = 1;
+        }, io);
+    }
+
+    CompletableFuture<String> createGroup(List<SimUser> others) {
+        return CompletableFuture.supplyAsync(() -> {
+            GroupManager.CreatedGroup g = groups.createGroup(others.stream().map(SimUser::asMember).toList());
+            sendOutbound(g.outbound());
+            return g.groupId();
+        }, io);
+    }
+
+    CompletableFuture<Void> sendGroup(String groupId, int index) {
+        return CompletableFuture.runAsync(() -> {
+            try {
+                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
+                while (!groups.canSend(groupId)) {
+                    if (System.nanoTime() > deadline) {
+                        throw new IllegalStateException("group state never arrived");
+                    }
+                    Thread.sleep(20);
+                }
+                String text = "sim|" + name + "|G|" + index + "|" + System.currentTimeMillis();
+                GroupManager.Sealed s = groups.encrypt(groupId, text.getBytes(StandardCharsets.UTF_8));
+                for (GroupManager.GroupMember m : s.recipients()) {
+                    sendEnvelope(m.mailboxId(), 2, s.wire());
+                }
+            } catch (Exception e) {
+                failed("group", e);
+            }
+        }, io);
+    }
+
+    private void sendOutbound(List<GroupManager.Outbound> out) {
+        for (GroupManager.Outbound o : out) {
+            try {
+                sendPairwise(o.toUid(), o.toMailbox(), o.plaintext());
+            } catch (Exception e) {
+                failed("control", e);
+            }
         }
-        send(WsProtocol.send(UUID.randomUUID(), to.mailboxId(), version, data, WsProtocol.defaultExpiryDay()));
+    }
+
+    private void sendPairwise(String peerUid, String peerMailbox, byte[] plaintext) throws Exception {
+        if (!convo.hasSession(peerUid)) {
+            PrekeyBundle bundle = fetchBundle(peerUid);
+            if (!convo.hasSession(peerUid)) {
+                convo.startSession(peerUid, bundle);
+            }
+        }
+        sendEnvelope(peerMailbox, 1, convo.encryptFor(peerUid, plaintext));
     }
 
     private PrekeyBundle fetchBundle(String uid) throws Exception {
@@ -97,6 +171,22 @@ final class SimUser implements WebSocket.Listener {
         } finally {
             bundles.remove(uid);
         }
+    }
+
+    private void sendEnvelope(String mailbox, int version, byte[] data) {
+        send(WsProtocol.send(UUID.randomUUID(), mailbox, version, data, WsProtocol.defaultExpiryDay()));
+    }
+
+    private static byte[] prefixed(byte kind, byte[] data) {
+        byte[] out = new byte[data.length + 1];
+        out[0] = kind;
+        System.arraycopy(data, 0, out, 1, data.length);
+        return out;
+    }
+
+    private void failed(String what, Exception e) {
+        stats.errors.incrementAndGet();
+        System.err.println(name + ": " + what + " failed: " + e);
     }
 
     void ping() {
@@ -121,6 +211,8 @@ final class SimUser implements WebSocket.Listener {
             return null;
         });
     }
+
+    // ------------------------------------------------------------------ receiving (listener thread)
 
     @Override
     public void onOpen(WebSocket w) {
@@ -179,19 +271,7 @@ final class SimUser implements WebSocket.Listener {
                     .computeIfAbsent(n.path("uid").asText(), k -> new CompletableFuture<>())
                     .completeExceptionally(new IllegalStateException("no prekey bundle for " + n.path("uid").asText()));
             case "wake" -> send(WsProtocol.sync(inbox.afterSeq(), 100));
-            case "msgs" -> {
-                WsInbox.Result r = inbox.onMsgs(WsProtocol.parseMsgs(n));
-                received.addAndGet(r.fresh().size());
-                for (Received x : r.fresh()) {
-                    onPayload(x);
-                }
-                if (!r.fresh().isEmpty()) {
-                    send(WsProtocol.ack(inbox.afterSeq()));
-                }
-                if (r.syncAgain()) {
-                    send(WsProtocol.sync(inbox.afterSeq(), 100));
-                }
-            }
+            case "msgs" -> onMsgs(n);
             case "ack" -> stats.sendAcks.incrementAndGet();
             case "acked", "pong" -> { }
             case "error" -> {
@@ -202,20 +282,75 @@ final class SimUser implements WebSocket.Listener {
         }
     }
 
-    private void onPayload(Received x) {
-        String text = null;
-        if (x.version() == 0) {
-            text = new String(x.payload(), StandardCharsets.UTF_8);
-        } else if (x.version() == 1 && convo != null) {
-            Optional<ConversationManager.Decrypted> d = convo.decrypt(x.payload());
-            if (d.isPresent()) {
-                text = new String(d.get().plaintext(), StandardCharsets.UTF_8);
+    private void onMsgs(JsonNode n) {
+        WsInbox.Result r = inbox.onMsgs(WsProtocol.parseMsgs(n));
+        for (Received x : r.fresh()) {
+            if (!process(x)) {
+                inbox.hold(x);
             }
         }
-        if (text == null) {
-            stats.undecryptable.incrementAndGet();
-        } else {
-            stats.onReceive(text);
+        retryHeld();
+        long ack = inbox.safeAckSeq();
+        if (ack > lastAcked) {
+            send(WsProtocol.ack(ack));
+            lastAcked = ack;
+        }
+        if (r.syncAgain()) {
+            send(WsProtocol.sync(inbox.afterSeq(), 100));
+        }
+    }
+
+    /** @return false if the message cannot be processed yet (keys may still be on the way) */
+    private boolean process(Received x) {
+        if (x.version() == 0) {
+            deliver(new String(x.payload(), StandardCharsets.UTF_8));
+            return true;
+        }
+        if (x.version() == 1 && convo != null) {
+            Optional<ConversationManager.Decrypted> d = convo.decrypt(x.payload());
+            if (d.isEmpty()) {
+                return false;
+            }
+            byte[] plain = d.get().plaintext();
+            if (plain.length == 0) {
+                return true;
+            }
+            if (plain[0] == GroupManager.KIND_CHAT) {
+                deliver(new String(plain, 1, plain.length - 1, StandardCharsets.UTF_8));
+                return true;
+            }
+            List<GroupManager.Outbound> follow = groups.handleControl(d.get().peerUid(), plain);
+            if (!follow.isEmpty()) {
+                io.execute(() -> sendOutbound(follow));
+            }
+            return true;
+        }
+        if (x.version() == 2 && groups != null) {
+            Optional<GroupManager.GroupDecrypted> g = groups.decrypt(x.payload());
+            if (g.isEmpty()) {
+                return false;
+            }
+            deliver(new String(g.get().plaintext(), StandardCharsets.UTF_8));
+            return true;
+        }
+        return false;
+    }
+
+    private void deliver(String text) {
+        received.incrementAndGet();
+        stats.onReceive(text, name);
+    }
+
+    private void retryHeld() {
+        boolean progress = true;
+        while (progress) {
+            progress = false;
+            for (Received h : inbox.heldItems()) {
+                if (process(h)) {
+                    inbox.release(h);
+                    progress = true;
+                }
+            }
         }
     }
 }

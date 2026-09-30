@@ -7,7 +7,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
-/** Payload format: sim|from|to|index|sentAtMillis. */
+/** Payload format: sim|from|to|index|sentAtMillis (to = user name or G for the group). */
 final class Stats {
     final Set<String> seen = ConcurrentHashMap.newKeySet();
     final AtomicInteger delivered = new AtomicInteger();
@@ -18,13 +18,13 @@ final class Stats {
     final AtomicInteger undecryptable = new AtomicInteger();
     final List<Long> latencies = Collections.synchronizedList(new ArrayList<>());
 
-    void onReceive(String text) {
+    void onReceive(String text, String receiver) {
         String[] p = text.split("\\|");
         if (p.length != 5 || !p[0].equals("sim")) {
             foreign.incrementAndGet();
             return;
         }
-        String key = p[1] + "->" + p[2] + "#" + p[3];
+        String key = p[1] + "->" + p[2] + "#" + p[3] + "@" + receiver;
         if (!seen.add(key)) {
             duplicates.incrementAndGet();
             return;

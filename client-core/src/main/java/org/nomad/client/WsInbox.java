@@ -2,15 +2,21 @@ package org.nomad.client;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.TreeMap;
 
 /**
- * Cursor logic for the WebSocket client: dedup by envelope id and epoch reset after a server failover.
- * The caller sends WsProtocol.sync(afterSeq(), ...) after auth, after every "wake", and while syncAgain is true.
+ * Cursor logic for the WebSocket client: dedup by envelope id, epoch reset after a server failover and
+ * a holding area for messages that cannot be decrypted yet (their keys may still be on the way).
+ * The caller sends WsProtocol.sync(afterSeq(), ...) after auth, after every "wake" and while syncAgain is true,
+ * and acknowledges only up to safeAckSeq(): the server keeps held messages until they are resolved.
  */
 public final class WsInbox {
+    private static final int MAX_HELD = 1000;
+
     public record Result(List<Received> fresh, boolean syncAgain) {}
 
     private final CursorState cursor;
+    private final TreeMap<Long, Received> held = new TreeMap<>();
 
     public WsInbox(CursorState cursor) {
         this.cursor = cursor;
@@ -35,5 +41,30 @@ public final class WsInbox {
             }
         }
         return new Result(fresh, m.more());
+    }
+
+    public void hold(Received r) {
+        held.put(r.seq(), r);
+        while (held.size() > MAX_HELD) {
+            held.pollFirstEntry();
+        }
+    }
+
+    public void release(Received r) {
+        held.remove(r.seq());
+    }
+
+    public List<Received> heldItems() {
+        return new ArrayList<>(held.values());
+    }
+
+    public int heldCount() {
+        return held.size();
+    }
+
+    /** Highest seq that may be acknowledged without dropping a held message. */
+    public long safeAckSeq() {
+        long cur = cursor.seq();
+        return held.isEmpty() ? cur : Math.min(cur, held.firstKey() - 1);
     }
 }
