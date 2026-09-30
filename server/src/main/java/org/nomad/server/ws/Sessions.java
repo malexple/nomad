@@ -7,6 +7,9 @@ import java.util.concurrent.ConcurrentHashMap;
 
 /** Local WebSocket sessions of this node, indexed by mailbox. */
 final class Sessions {
+    /** Special mailbox id: wake every session of this node (used after the bus reconnects). */
+    static final String ALL = "*";
+
     private final ConcurrentHashMap<String, Set<Channel>> byMailbox = new ConcurrentHashMap<>();
 
     void add(String mailbox, Channel ch) {
@@ -22,14 +25,26 @@ final class Sessions {
 
     /** Only a hint: the client answers with "sync" and reads from the store by cursor. */
     void wake(String mailbox) {
+        if (ALL.equals(mailbox)) {
+            for (Set<Channel> set : byMailbox.values()) {
+                for (Channel ch : set) {
+                    wakeChannel(ch);
+                }
+            }
+            return;
+        }
         Set<Channel> set = byMailbox.get(mailbox);
         if (set == null) {
             return;
         }
         for (Channel ch : set) {
-            if (ch.isActive()) {
-                ch.writeAndFlush(new TextWebSocketFrame("{\"t\":\"wake\"}"));
-            }
+            wakeChannel(ch);
+        }
+    }
+
+    private static void wakeChannel(Channel ch) {
+        if (ch.isActive()) {
+            ch.writeAndFlush(new TextWebSocketFrame("{\"t\":\"wake\"}"));
         }
     }
 

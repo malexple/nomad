@@ -9,6 +9,7 @@ import java.security.KeyPair;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.nomad.client.CursorState;
 import org.nomad.client.Received;
 import org.nomad.client.WsInbox;
@@ -22,6 +23,8 @@ final class SimUser implements WebSocket.Listener {
     final String url;
     final KeyPair keys = DeviceAuth.generateKeyPair();
     final CompletableFuture<Void> ready = new CompletableFuture<>();
+    final AtomicInteger received = new AtomicInteger();
+    volatile String closedInfo;
 
     private final Stats stats;
     private final WsInbox inbox = new WsInbox(new CursorState());
@@ -56,6 +59,11 @@ final class SimUser implements WebSocket.Listener {
         send(WsProtocol.ping());
     }
 
+    /** Safety net: reads by cursor even if a wake signal was lost. */
+    void syncNow() {
+        send(WsProtocol.sync(inbox.afterSeq(), 100));
+    }
+
     void close() {
         WebSocket w = ws;
         if (w != null) {
@@ -64,7 +72,10 @@ final class SimUser implements WebSocket.Listener {
     }
 
     private synchronized void send(String json) {
-        tail = tail.thenCompose(x -> ws.sendText(json, true));
+        tail = tail.thenCompose(x -> ws.sendText(json, true)).exceptionally(err -> {
+            closedInfo = "SEND FAILED " + err;
+            return null;
+        });
     }
 
     @Override
@@ -91,7 +102,15 @@ final class SimUser implements WebSocket.Listener {
     }
 
     @Override
+    public CompletionStage<?> onClose(WebSocket w, int statusCode, String reason) {
+        closedInfo = "CLOSED by peer " + statusCode + " " + reason;
+        System.err.println(name + ": " + closedInfo);
+        return null;
+    }
+
+    @Override
     public void onError(WebSocket w, Throwable error) {
+        closedInfo = "ERROR " + error;
         stats.errors.incrementAndGet();
         ready.completeExceptionally(error);
         System.err.println(name + ": websocket error " + error);
@@ -108,6 +127,7 @@ final class SimUser implements WebSocket.Listener {
             case "wake" -> send(WsProtocol.sync(inbox.afterSeq(), 100));
             case "msgs" -> {
                 WsInbox.Result r = inbox.onMsgs(WsProtocol.parseMsgs(n));
+                received.addAndGet(r.fresh().size());
                 for (Received x : r.fresh()) {
                     stats.onReceive(new String(x.payload(), StandardCharsets.UTF_8));
                 }
