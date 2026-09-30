@@ -16,6 +16,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import org.nomad.bus.WakeBus;
 import org.nomad.mailbox.MailboxStore;
+import org.nomad.mailbox.PrekeyDirectory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -30,6 +31,7 @@ class WsGateway implements SmartLifecycle {
 
     private final int port;
     private final MailboxStore store;
+    private final PrekeyDirectory directory;
     private final WakeBus bus;
     private final ObjectMapper mapper;
     private final Sessions sessions = new Sessions();
@@ -41,9 +43,15 @@ class WsGateway implements SmartLifecycle {
     private Runnable unsubscribe;
     private volatile boolean running;
 
-    WsGateway(@Value("${nomad.ws.port:8090}") int port, MailboxStore store, WakeBus bus, ObjectMapper mapper) {
+    WsGateway(
+            @Value("${nomad.ws.port:8090}") int port,
+            MailboxStore store,
+            PrekeyDirectory directory,
+            WakeBus bus,
+            ObjectMapper mapper) {
         this.port = port;
         this.store = store;
+        this.directory = directory;
         this.bus = bus;
         this.mapper = mapper;
     }
@@ -53,7 +61,7 @@ class WsGateway implements SmartLifecycle {
         exec = Executors.newVirtualThreadPerTaskExecutor();
         boss = new NioEventLoopGroup(1);
         workers = new NioEventLoopGroup();
-        GatewayHandler handler = new GatewayHandler(store, bus, sessions, mapper, exec);
+        GatewayHandler handler = new GatewayHandler(store, directory, bus, sessions, mapper, exec);
         ServerBootstrap b = new ServerBootstrap()
                 .group(boss, workers)
                 .channel(NioServerSocketChannel.class)

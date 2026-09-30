@@ -15,16 +15,23 @@ import io.netty.util.AttributeKey;
 import java.io.IOException;
 import java.security.PublicKey;
 import java.security.SecureRandom;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.HexFormat;
+import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import org.nomad.bus.WakeBus;
 import org.nomad.core.DeviceAuth;
 import org.nomad.core.Envelope;
 import org.nomad.core.Ids;
+import org.nomad.core.OneTimePrekey;
+import org.nomad.core.PrekeyBundle;
 import org.nomad.mailbox.AppendResult;
 import org.nomad.mailbox.MailboxStore;
+import org.nomad.mailbox.PrekeyDirectory;
 import org.nomad.mailbox.ReadResult;
 import org.nomad.mailbox.StoredEnvelope;
 import org.slf4j.Logger;
@@ -39,16 +46,25 @@ final class GatewayHandler extends SimpleChannelInboundHandler<TextWebSocketFram
     private static final Logger LOG = LoggerFactory.getLogger(GatewayHandler.class);
     private static final AttributeKey<String> NONCE = AttributeKey.valueOf("nonce");
     private static final AttributeKey<String> MAILBOX = AttributeKey.valueOf("mailbox");
+    private static final AttributeKey<byte[]> KEY = AttributeKey.valueOf("key");
     private static final SecureRandom RANDOM = new SecureRandom();
 
     private final MailboxStore store;
+    private final PrekeyDirectory directory;
     private final WakeBus bus;
     private final Sessions sessions;
     private final ObjectMapper mapper;
     private final ExecutorService exec;
 
-    GatewayHandler(MailboxStore store, WakeBus bus, Sessions sessions, ObjectMapper mapper, ExecutorService exec) {
+    GatewayHandler(
+            MailboxStore store,
+            PrekeyDirectory directory,
+            WakeBus bus,
+            Sessions sessions,
+            ObjectMapper mapper,
+            ExecutorService exec) {
         this.store = store;
+        this.directory = directory;
         this.bus = bus;
         this.sessions = sessions;
         this.mapper = mapper;
@@ -109,6 +125,8 @@ final class GatewayHandler extends SimpleChannelInboundHandler<TextWebSocketFram
             case "send" -> onSend(ctx, n);
             case "sync" -> onSync(ctx, mailbox, n);
             case "ack" -> onAck(ctx, mailbox, n);
+            case "pk_put" -> onPkPut(ctx, n);
+            case "pk_get" -> onPkGet(ctx, n);
             case "ping" -> {
                 ObjectNode o = mapper.createObjectNode();
                 o.put("t", "pong");
@@ -132,6 +150,7 @@ final class GatewayHandler extends SimpleChannelInboundHandler<TextWebSocketFram
             return;
         }
         String mailbox = Ids.mailboxIdFor(raw);
+        ctx.channel().attr(KEY).set(raw);
         ctx.channel().attr(MAILBOX).set(mailbox);
         sessions.add(mailbox, ctx.channel());
         ctx.channel().closeFuture().addListener(f -> sessions.remove(mailbox, ctx.channel()));
@@ -151,7 +170,8 @@ final class GatewayHandler extends SimpleChannelInboundHandler<TextWebSocketFram
                 n.path("exp").asLong());
         AppendResult r = store.append(env);
         if (!r.duplicate()) {
-            bus.publish(env.mailboxId());
+            sessions.wake(env.mailboxId()); // local fast path, independent of Redis
+            bus.publish(env.mailboxId()); // other nodes
         }
         ObjectNode o = mapper.createObjectNode();
         o.put("t", "ack");
@@ -186,6 +206,78 @@ final class GatewayHandler extends SimpleChannelInboundHandler<TextWebSocketFram
         o.put("t", "acked");
         o.put("deleted", store.deleteUpTo(mailbox, n.path("upTo").asLong()));
         send(ctx, o);
+    }
+
+    private void onPkPut(ChannelHandlerContext ctx, JsonNode n) {
+        PrekeyBundle b = parseBundle(n.path("bundle"));
+        byte[] sessionKey = ctx.channel().attr(KEY).get();
+        if (!Arrays.equals(b.sigKey(), sessionKey)) {
+            throw new IllegalArgumentException("bundle key does not match the session key");
+        }
+        if (!b.verifySignatures()) {
+            throw new IllegalArgumentException("bad bundle signatures");
+        }
+        List<OneTimePrekey> opks = new ArrayList<>();
+        for (JsonNode k : n.path("opks")) {
+            opks.add(new OneTimePrekey(k.path("id").asInt(), Base64.getDecoder().decode(k.path("pub").asText())));
+        }
+        if (opks.size() > PrekeyDirectory.MAX_ONE_TIME_PREKEYS) {
+            throw new IllegalArgumentException("too many one-time prekeys");
+        }
+        directory.publish(b, opks);
+        ObjectNode o = mapper.createObjectNode();
+        o.put("t", "pk_ok");
+        o.put("opks", directory.oneTimePrekeyCount(b.uid()));
+        send(ctx, o);
+    }
+
+    private void onPkGet(ChannelHandlerContext ctx, JsonNode n) {
+        String uid = n.path("uid").asText();
+        Optional<PrekeyBundle> b = directory.fetch(uid);
+        ObjectNode o = mapper.createObjectNode();
+        if (b.isEmpty()) {
+            o.put("t", "pk_none");
+            o.put("uid", uid);
+        } else {
+            o.put("t", "pk");
+            o.put("uid", uid);
+            o.set("bundle", bundleNode(b.get()));
+        }
+        send(ctx, o);
+    }
+
+    private static PrekeyBundle parseBundle(JsonNode n) {
+        Base64.Decoder d = Base64.getDecoder();
+        OneTimePrekey opk = null;
+        JsonNode k = n.path("opk");
+        if (k.isObject()) {
+            opk = new OneTimePrekey(k.path("id").asInt(), d.decode(k.path("pub").asText()));
+        }
+        return new PrekeyBundle(
+                d.decode(n.path("sigKey").asText()),
+                d.decode(n.path("ikDh").asText()),
+                d.decode(n.path("sigIk").asText()),
+                n.path("spkId").asInt(),
+                d.decode(n.path("spk").asText()),
+                d.decode(n.path("sigSpk").asText()),
+                opk);
+    }
+
+    private ObjectNode bundleNode(PrekeyBundle b) {
+        Base64.Encoder e = Base64.getEncoder();
+        ObjectNode n = mapper.createObjectNode();
+        n.put("sigKey", e.encodeToString(b.sigKey()));
+        n.put("ikDh", e.encodeToString(b.ikDh()));
+        n.put("sigIk", e.encodeToString(b.sigIkDh()));
+        n.put("spkId", b.spkId());
+        n.put("spk", e.encodeToString(b.spk()));
+        n.put("sigSpk", e.encodeToString(b.sigSpk()));
+        if (b.opk() != null) {
+            ObjectNode k = n.putObject("opk");
+            k.put("id", b.opk().id());
+            k.put("pub", e.encodeToString(b.opk().pub()));
+        }
+        return n;
     }
 
     private void send(ChannelHandlerContext ctx, ObjectNode o) {

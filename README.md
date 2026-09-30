@@ -1,29 +1,31 @@
 # nomad (working name)
 
-Open messenger protocol. **Draft 0.1, not audited.** Encryption is NOT implemented yet (`DevPlaintextSession`),
-do not use it for real messages. Plan: docs/ROADMAP.md, WebSocket protocol: docs/ws-protocol.md.
+Open messenger protocol. **Draft 0.1, not audited.** End-to-end encryption (X3DH + Double Ratchet) exists at scheme
+version 1 (docs/e2ee.md); version 0 is dev plaintext. Plan: docs/ROADMAP.md, WebSocket protocol: docs/ws-protocol.md.
 
 ## Modules
-core, crypto, mailbox, bus (Local/Redis), server (REST + Netty WebSocket gateway), client-core, client-cli, client-sim.
+core, crypto (X3DH, Double Ratchet, ConversationManager), mailbox (envelopes + prekey directory), bus (Local/Redis),
+server (REST + Netty WebSocket gateway), client-core, client-cli, client-sim.
 
-## Check 1: one node, in memory
+## Check 1: unit tests
     ./gradlew test
+
+## Check 2: one node, in memory
     ./gradlew :server:bootRun
-    ./gradlew :client-sim:run --args="--users 3 --messages 10"      # expect RESULT: OK
+    ./gradlew :client-sim:run --args="--users 3 --messages 10"
+    ./gradlew :client-sim:run --args="--users 3 --messages 10 --encrypt true"
 
-## Check 2: two nodes, PostgreSQL, Redis
+## Check 3: two nodes, PostgreSQL, Redis (needed for encryption across nodes: the prekey directory lives in PostgreSQL)
     docker compose -f docker-compose.dev.yml up -d
+    # terminal 1
     ./gradlew :server:bootRun --args="--server.port=8080 --nomad.ws.port=8090 --nomad.store=postgres --nomad.bus=redis"
-    # second terminal
+    # terminal 2
     ./gradlew :server:bootRun --args="--server.port=8081 --nomad.ws.port=8091 --nomad.store=postgres --nomad.bus=redis"
-    # third terminal
-    ./gradlew :client-sim:run --args="--urls ws://localhost:8090/v1/ws,ws://localhost:8091/v1/ws --users 6 --messages 50"
+    # terminal 3
+    ./gradlew :client-sim:run --args="--urls ws://localhost:8090/v1/ws,ws://localhost:8091/v1/ws --users 6 --messages 20 --encrypt true"
 
-Users are spread round-robin over the nodes, so most messages cross from one node to the other through Redis.
-Stop Redis (`docker compose stop redis`) while the simulator runs and start it again: messages still arrive
-(on the next sync), because Redis is only a wake-up hint.
-
-CLI over REST (v0): see client-cli. Failover: docs/failover.md.
+Users are spread round-robin over the nodes. Outage drills (stop Redis while the simulator runs): see docs/ROADMAP.md.
+Failover: docs/failover.md.
 
 ## License
 Code: Apache-2.0 (add the full LICENSE text). Specification text: CC BY 4.0.

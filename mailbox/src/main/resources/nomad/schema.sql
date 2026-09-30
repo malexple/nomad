@@ -13,3 +13,19 @@ create table if not exists envelope (
     created_at timestamptz not null default now()
 );
 create index if not exists envelope_mailbox_seq on envelope (mailbox_id, seq);
+create table if not exists identity_bundle (
+    uid text primary key,
+    sig_key bytea not null,
+    ik_dh bytea not null,
+    sig_ik_dh bytea not null,
+    spk_id int not null,
+    spk bytea not null,
+    sig_spk bytea not null,
+    updated_at timestamptz not null default now()
+);
+create table if not exists one_time_prekey (
+    uid text not null,
+    opk_id int not null,
+    pub bytea not null,
+    primary key (uid, opk_id)
+);

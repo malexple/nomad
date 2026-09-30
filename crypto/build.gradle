@@ -1,4 +1,5 @@
 dependencies {
-    // Bouncy Castle (X25519, HKDF, AES-GCM / ChaCha20-Poly1305) is added in the next step
     api project(':core')
+    // X25519 (RFC 7748) comes from Bouncy Castle; HMAC/AES-GCM/Ed25519 are standard JCE
+    implementation 'org.bouncycastle:bcprov-jdk18on:1.78.1'
 }

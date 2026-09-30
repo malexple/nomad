@@ -15,9 +15,11 @@ import java.util.concurrent.TimeUnit;
  * Emulates N users spread over one or more gateway nodes; every user sends M messages to the others,
  * then the tool checks exactly-once delivery, prints latency percentiles and a per-user table.
  *
- * args: --urls ws://h1:8090/v1/ws,ws://h2:8091/v1/ws  --users 5  --messages 20  --timeout 30  --delay-ms 0  --poll-sec 5
+ * args: --urls ws://h1:8090/v1/ws,ws://h2:8091/v1/ws  --users 5  --messages 20  --timeout 30  --delay-ms 0
+ *       --poll-sec 5  --encrypt false
  * --poll-sec 0 disables the periodic sync (then only wake signals deliver: use it to test the bus).
- * Exit code 0 = everything delivered exactly once, 1 = something is missing or duplicated.
+ * --encrypt true: X3DH + Double Ratchet between all users (the node sees only ciphertext).
+ * Exit code 0 = everything delivered exactly once (and decrypted), 1 = something is missing or duplicated.
  */
 public final class Main {
     public static void main(String[] args) throws Exception {
@@ -28,17 +30,21 @@ public final class Main {
         int timeoutSec = Integer.parseInt(a.getOrDefault("timeout", "30"));
         long delayMs = Long.parseLong(a.getOrDefault("delay-ms", "0"));
         int pollSec = Integer.parseInt(a.getOrDefault("poll-sec", "5"));
+        boolean encrypt = Boolean.parseBoolean(a.getOrDefault("encrypt", "false"));
 
         Stats stats = new Stats();
         HttpClient http = HttpClient.newHttpClient();
         List<SimUser> list = new ArrayList<>();
         for (int i = 0; i < users; i++) {
-            list.add(new SimUser("u" + i, urls[i % urls.length].trim(), stats));
+            list.add(new SimUser("u" + i, urls[i % urls.length].trim(), stats, encrypt));
         }
         list.forEach(u -> u.connect(http));
         CompletableFuture.allOf(list.stream().map(u -> u.ready).toArray(CompletableFuture[]::new))
                 .get(15, TimeUnit.SECONDS);
-        System.out.printf("connected %d users to %d node(s), poll-sec=%d%n", users, urls.length, pollSec);
+        CompletableFuture.allOf(list.stream().map(u -> u.published).toArray(CompletableFuture[]::new))
+                .get(15, TimeUnit.SECONDS);
+        System.out.printf("connected %d users to %d node(s), poll-sec=%d, encrypt=%s%n",
+                users, urls.length, pollSec, encrypt);
 
         ScheduledExecutorService timer = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "sim-timer");
@@ -57,8 +63,13 @@ public final class Main {
                 SimUser from = list.get(i);
                 SimUser to = users > 1 ? list.get((i + 1 + (m % (users - 1))) % users) : from;
                 expectedIn.merge(to.name, 1, Integer::sum);
-                from.sendEnvelope(to.mailboxId(),
-                        "sim|" + from.name + "|" + to.name + "|" + m + "|" + System.currentTimeMillis());
+                try {
+                    from.sendMessage(to,
+                            "sim|" + from.name + "|" + to.name + "|" + m + "|" + System.currentTimeMillis());
+                } catch (Exception e) {
+                    stats.errors.incrementAndGet();
+                    System.err.println(from.name + ": send failed: " + e);
+                }
             }
             if (delayMs > 0) {
                 Thread.sleep(delayMs);
@@ -78,9 +89,9 @@ public final class Main {
         }
         double seconds = (System.nanoTime() - started) / 1e9;
 
-        System.out.printf("expected=%d delivered=%d duplicates=%d sendAcks=%d errors=%d foreign=%d%n",
+        System.out.printf("expected=%d delivered=%d duplicates=%d sendAcks=%d errors=%d foreign=%d undecryptable=%d%n",
                 expected, stats.delivered.get(), stats.duplicates.get(), stats.sendAcks.get(),
-                stats.errors.get(), stats.foreign.get());
+                stats.errors.get(), stats.foreign.get(), stats.undecryptable.get());
         System.out.printf("latency ms: p50=%d p95=%d max=%d  total=%.2fs%n",
                 stats.percentile(0.50), stats.percentile(0.95), stats.percentile(1.0), seconds);
         System.out.println("per user (name, node, expected incoming, got, connection state):");
@@ -91,7 +102,8 @@ public final class Main {
         }
         list.forEach(SimUser::close);
         Thread.sleep(300);
-        boolean ok = stats.delivered.get() == expected && stats.duplicates.get() == 0 && stats.errors.get() == 0;
+        boolean ok = stats.delivered.get() == expected && stats.duplicates.get() == 0
+                && stats.errors.get() == 0 && stats.undecryptable.get() == 0;
         System.out.println(ok ? "RESULT: OK" : "RESULT: FAIL");
         System.exit(ok ? 0 : 1);
     }

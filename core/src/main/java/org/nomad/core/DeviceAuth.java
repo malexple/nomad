@@ -1,5 +1,6 @@
 package org.nomad.core;
 
+import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
 import java.security.KeyFactory;
 import java.security.KeyPair;
@@ -54,25 +55,33 @@ public final class DeviceAuth {
                 + HexFormat.of().formatHex(Ids.sha256(body));
     }
 
-    public static byte[] sign(PrivateKey key, String canonical) {
+    public static byte[] signBytes(PrivateKey key, byte[] data) {
         try {
             Signature s = Signature.getInstance("Ed25519");
             s.initSign(key);
-            s.update(canonical.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            s.update(data);
             return s.sign();
         } catch (GeneralSecurityException e) {
             throw new IllegalStateException(e);
         }
     }
 
-    public static boolean verify(PublicKey key, String canonical, byte[] signature) {
+    public static boolean verifyBytes(PublicKey key, byte[] data, byte[] signature) {
         try {
             Signature s = Signature.getInstance("Ed25519");
             s.initVerify(key);
-            s.update(canonical.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            s.update(data);
             return s.verify(signature);
         } catch (GeneralSecurityException e) {
             return false;
         }
+    }
+
+    public static byte[] sign(PrivateKey key, String canonical) {
+        return signBytes(key, canonical.getBytes(StandardCharsets.UTF_8));
+    }
+
+    public static boolean verify(PublicKey key, String canonical, byte[] signature) {
+        return verifyBytes(key, canonical.getBytes(StandardCharsets.UTF_8), signature);
     }
 }

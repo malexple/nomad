@@ -15,6 +15,7 @@ final class Stats {
     final AtomicInteger foreign = new AtomicInteger();
     final AtomicInteger sendAcks = new AtomicInteger();
     final AtomicInteger errors = new AtomicInteger();
+    final AtomicInteger undecryptable = new AtomicInteger();
     final List<Long> latencies = Collections.synchronizedList(new ArrayList<>());
 
     void onReceive(String text) {
