@@ -16,6 +16,14 @@ public final class X25519Keys {
         return new Pair(k, publicFor(k));
     }
 
+    /** Restores a pair from a stored private key. */
+    public static Pair fromPrivate(byte[] priv) {
+        if (priv.length != 32) {
+            throw new IllegalArgumentException("X25519 private key must be 32 bytes");
+        }
+        return new Pair(priv.clone(), publicFor(priv));
+    }
+
     public static byte[] publicFor(byte[] priv) {
         byte[] pub = new byte[32];
         X25519.generatePublicKey(priv, 0, pub, 0);

@@ -2,6 +2,8 @@ package org.nomad.crypto;
 
 import java.security.MessageDigest;
 import java.util.Arrays;
+import org.nomad.core.BinReader;
+import org.nomad.core.BinWriter;
 import org.nomad.core.Ids;
 import org.nomad.core.PrekeyBundle;
 
@@ -82,5 +84,19 @@ final class RatchetSession implements E2eeSession {
         byte[] plaintext = ratchet.decrypt(Arrays.copyOfRange(wire, off, wire.length));
         pendingInitialHeader = null;
         return plaintext;
+    }
+
+    // ---------------------------------------------------------------- persistence
+
+    synchronized void writeTo(BinWriter w) {
+        w.str(peerUid).bytes(handshakeId).nullableBytes(pendingInitialHeader);
+        ratchet.writeTo(w);
+    }
+
+    static RatchetSession readFrom(BinReader r) {
+        String peer = r.str();
+        byte[] handshake = r.bytes();
+        byte[] pending = r.nullableBytes();
+        return new RatchetSession(peer, DoubleRatchet.readFrom(r), handshake, pending);
     }
 }

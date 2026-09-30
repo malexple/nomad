@@ -8,6 +8,8 @@ import java.util.Map;
 import javax.crypto.Cipher;
 import javax.crypto.spec.GCMParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
+import org.nomad.core.BinReader;
+import org.nomad.core.BinWriter;
 
 /**
  * Double Ratchet (Signal specification). KDF_RK = HKDF(salt = rk, ikm = dh_out), KDF_CK = HMAC-SHA256
@@ -207,5 +209,34 @@ public final class DoubleRatchet {
         pn = o.pn;
         skipped.clear();
         skipped.putAll(o.skipped);
+    }
+
+    // ---------------------------------------------------------------- persistence
+
+    synchronized void writeTo(BinWriter w) {
+        w.bytes(ad).bytes(dhs.priv()).nullableBytes(dhr).bytes(rk).nullableBytes(cks).nullableBytes(ckr);
+        w.i32(ns).i32(nr).i32(pn);
+        w.i32(skipped.size());
+        for (Map.Entry<String, byte[]> e : skipped.entrySet()) {
+            w.str(e.getKey()).bytes(e.getValue());
+        }
+    }
+
+    static DoubleRatchet readFrom(BinReader r) {
+        DoubleRatchet s = new DoubleRatchet(r.bytes());
+        s.dhs = X25519Keys.fromPrivate(r.bytes());
+        s.dhr = r.nullableBytes();
+        s.rk = r.bytes();
+        s.cks = r.nullableBytes();
+        s.ckr = r.nullableBytes();
+        s.ns = r.i32();
+        s.nr = r.i32();
+        s.pn = r.i32();
+        int n = r.count();
+        for (int i = 0; i < n; i++) {
+            String key = r.str();
+            s.skipped.put(key, r.bytes());
+        }
+        return s;
     }
 }

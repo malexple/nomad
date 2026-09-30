@@ -5,13 +5,13 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import java.security.KeyPair;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 import java.util.UUID;
 import org.nomad.core.DeviceAuth;
+import org.nomad.core.DeviceKeyPair;
 import org.nomad.core.OneTimePrekey;
 import org.nomad.core.PrekeyBundle;
 
@@ -23,11 +23,11 @@ public final class WsProtocol {
 
     public record Msgs(long epoch, boolean more, List<Received> items) {}
 
-    public static String auth(KeyPair kp, String nonce) {
-        byte[] sig = DeviceAuth.sign(kp.getPrivate(), "NOMAD-WS-AUTH\n" + nonce);
+    public static String auth(DeviceKeyPair kp, String nonce) {
+        byte[] sig = DeviceAuth.sign(kp.priv(), "NOMAD-WS-AUTH\n" + nonce);
         ObjectNode o = M.createObjectNode();
         o.put("t", "auth");
-        o.put("key", b64(DeviceAuth.rawPublicKey(kp.getPublic())));
+        o.put("key", b64(kp.pub()));
         o.put("sig", b64(sig));
         return o.toString();
     }

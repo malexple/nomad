@@ -1,1 +1,7 @@
-// no external dependencies: core must stay portable (JVM + Android)
+dependencies {
+    // Ed25519 (RFC 8032) as plain bytes: the JDK's own Ed25519 is missing or unreliable on Android
+    implementation 'org.bouncycastle:bcprov-jdk18on:1.78.1'
+}
+
+// core, crypto and client-core are shared with the Android app: no Java 18+ APIs there
+tasks.withType(JavaCompile).configureEach { options.release = 17 }

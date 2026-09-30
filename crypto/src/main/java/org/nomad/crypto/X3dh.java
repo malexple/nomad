@@ -1,6 +1,5 @@
 package org.nomad.crypto;
 
-import java.security.PublicKey;
 import java.util.Arrays;
 import org.nomad.core.DeviceAuth;
 import org.nomad.core.PrekeyBundle;
@@ -36,8 +35,7 @@ final class X3dh {
     }
 
     static ResponderResult respond(Identity bob, InitialHeader h) {
-        PublicKey sigA = DeviceAuth.publicKeyFromRaw(h.sigKeyA());
-        if (!DeviceAuth.verifyBytes(sigA, PrekeyBundle.ikMessage(h.ikDhA()), h.sigIkDhA())) {
+        if (!DeviceAuth.verifyBytes(h.sigKeyA(), PrekeyBundle.ikMessage(h.ikDhA()), h.sigIkDhA())) {
             throw new SecurityException("bad identity key signature");
         }
         X25519Keys.Pair spk = bob.signedPrekey(h.spkId());

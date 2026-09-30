@@ -1,5 +1,8 @@
 dependencies {
     api project(':core')
-    // X25519 (RFC 7748) comes from Bouncy Castle; HMAC/AES-GCM/Ed25519 are standard JCE
+    // X25519 (RFC 7748) comes from Bouncy Castle; HMAC/HKDF/AES-GCM are standard JCE
     implementation 'org.bouncycastle:bcprov-jdk18on:1.78.1'
 }
+
+// shared with the Android app: no Java 18+ APIs
+tasks.withType(JavaCompile).configureEach { options.release = 17 }

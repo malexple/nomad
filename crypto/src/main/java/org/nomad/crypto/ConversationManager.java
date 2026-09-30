@@ -5,6 +5,8 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import org.nomad.core.BinReader;
+import org.nomad.core.BinWriter;
 import org.nomad.core.Ids;
 import org.nomad.core.PrekeyBundle;
 
@@ -105,5 +107,32 @@ public final class ConversationManager {
         }
         byPeer.computeIfAbsent(peer, k -> new ArrayList<>()).add(0, fresh);
         return Optional.of(new Decrypted(peer, pt));
+    }
+
+    // ---------------------------------------------------------------- persistence
+
+    public synchronized void writeTo(BinWriter w) {
+        w.i32(byPeer.size());
+        for (Map.Entry<String, List<RatchetSession>> e : byPeer.entrySet()) {
+            w.str(e.getKey()).i32(e.getValue().size());
+            for (RatchetSession s : e.getValue()) {
+                s.writeTo(w);
+            }
+        }
+    }
+
+    public static ConversationManager readFrom(Identity me, BinReader r) {
+        ConversationManager m = new ConversationManager(me);
+        int peers = r.count();
+        for (int i = 0; i < peers; i++) {
+            String peer = r.str();
+            int n = r.count();
+            List<RatchetSession> l = new ArrayList<>();
+            for (int j = 0; j < n; j++) {
+                l.add(RatchetSession.readFrom(r));
+            }
+            m.byPeer.put(peer, l);
+        }
+        return m;
     }
 }

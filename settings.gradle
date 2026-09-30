@@ -1,2 +1,2 @@
 rootProject.name = 'nomad'
-include 'core', 'crypto', 'mailbox', 'bus', 'server', 'client-core', 'client-cli', 'client-sim'
+include 'core', 'crypto', 'mailbox', 'bus', 'server', 'client-core', 'client-sim'

@@ -10,6 +10,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import org.nomad.core.BinReader;
+import org.nomad.core.BinWriter;
 import org.nomad.core.DeviceAuth;
 import org.nomad.core.Ids;
 
@@ -67,13 +69,21 @@ public final class GroupManager {
     public record GroupDecrypted(String groupId, String senderUid, byte[] plaintext) {}
 
     private static final class SenderChain {
-        final byte[] chainId = new byte[16];
-        byte[] ck = new byte[32];
+        final byte[] chainId;
+        byte[] ck;
         int iteration;
 
         SenderChain() {
+            chainId = new byte[16];
+            ck = new byte[32];
             RANDOM.nextBytes(chainId);
             RANDOM.nextBytes(ck);
+        }
+
+        SenderChain(byte[] chainId, byte[] ck, int iteration) {
+            this.chainId = chainId;
+            this.ck = ck;
+            this.iteration = iteration;
         }
     }
 
@@ -398,7 +408,7 @@ public final class GroupManager {
         byte[] aad = Bytes.concat(g.groupId, c.chainId, Bytes.intBE(iteration));
         byte[] ct = Aead.crypt(true, mk, INFO_GROUP, Padding.pad(plaintext), aad);
         byte[] sig = DeviceAuth.signBytes(
-                me.sigKeyPair().getPrivate(),
+                me.deviceKeys().priv(),
                 Bytes.concat(SIG_DOMAIN, g.groupId, c.chainId, Bytes.intBE(iteration), ct));
         byte[] wire = Bytes.concat(c.chainId, Bytes.intBE(iteration), ct, sig);
         List<GroupMember> recipients = new ArrayList<>();
@@ -430,7 +440,7 @@ public final class GroupManager {
                     return Optional.empty();
                 }
                 byte[] signed = Bytes.concat(SIG_DOMAIN, g.groupId, chainId, Bytes.intBE(iteration), ct);
-                if (!DeviceAuth.verifyBytes(DeviceAuth.publicKeyFromRaw(c.senderSigKey), signed, sig)) {
+                if (!DeviceAuth.verifyBytes(c.senderSigKey, signed, sig)) {
                     return Optional.empty();
                 }
                 byte[] aad = Bytes.concat(g.groupId, chainId, Bytes.intBE(iteration));
@@ -441,5 +451,85 @@ public final class GroupManager {
         } catch (RuntimeException e) {
             return Optional.empty();
         }
+    }
+
+    // ---------------------------------------------------------------- persistence
+
+    public synchronized void writeTo(BinWriter w) {
+        w.i32(groups.size());
+        for (Group g : groups.values()) {
+            w.bytes(g.groupId).str(g.adminUid).i32(g.generation);
+            w.i32(g.members.size());
+            for (byte[] key : g.members.values()) {
+                w.bytes(key);
+            }
+            w.bool(g.mine != null);
+            if (g.mine != null) {
+                w.bytes(g.mine.chainId).bytes(g.mine.ck).i32(g.mine.iteration);
+            }
+            w.i32(g.recv.size());
+            for (Map.Entry<String, ReceiveChain> e : g.recv.entrySet()) {
+                ReceiveChain c = e.getValue();
+                w.str(e.getKey()).i32(c.generation).bytes(c.senderSigKey).bytes(c.ck).i32(c.next);
+                w.i32(c.skipped.size());
+                for (Map.Entry<Integer, byte[]> s : c.skipped.entrySet()) {
+                    w.i32(s.getKey()).bytes(s.getValue());
+                }
+            }
+        }
+        w.i32(pending.size());
+        for (Map.Entry<String, List<PendingKey>> e : pending.entrySet()) {
+            w.str(e.getKey()).i32(e.getValue().size());
+            for (PendingKey p : e.getValue()) {
+                w.str(p.fromUid()).bytes(p.plaintext());
+            }
+        }
+    }
+
+    public static GroupManager readFrom(Identity me, BinReader r) {
+        GroupManager m = new GroupManager(me);
+        int groupCount = r.count();
+        for (int i = 0; i < groupCount; i++) {
+            Group g = new Group(r.bytes());
+            g.adminUid = r.str();
+            g.generation = r.i32();
+            int members = r.count();
+            for (int j = 0; j < members; j++) {
+                byte[] key = r.bytes();
+                g.members.put(Ids.uid(key), key);
+            }
+            if (r.bool()) {
+                byte[] chainId = r.bytes();
+                byte[] ck = r.bytes();
+                g.mine = new SenderChain(chainId, ck, r.i32());
+            }
+            int chains = r.count();
+            for (int j = 0; j < chains; j++) {
+                String chainHex = r.str();
+                int generation = r.i32();
+                byte[] sigKey = r.bytes();
+                byte[] ck = r.bytes();
+                ReceiveChain c = new ReceiveChain(generation, Ids.uid(sigKey), sigKey, ck, r.i32());
+                int skipped = r.count();
+                for (int k = 0; k < skipped; k++) {
+                    int iteration = r.i32();
+                    c.skipped.put(iteration, r.bytes());
+                }
+                g.recv.put(chainHex, c);
+            }
+            m.groups.put(g.groupHex, g);
+        }
+        int pendingGroups = r.count();
+        for (int i = 0; i < pendingGroups; i++) {
+            String hex = r.str();
+            int n = r.count();
+            List<PendingKey> list = new ArrayList<>();
+            for (int j = 0; j < n; j++) {
+                String from = r.str();
+                list.add(new PendingKey(from, r.bytes()));
+            }
+            m.pending.put(hex, list);
+        }
+        return m;
     }
 }

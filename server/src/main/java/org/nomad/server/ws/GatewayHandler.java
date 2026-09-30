@@ -13,12 +13,10 @@ import io.netty.handler.codec.http.websocketx.WebSocketServerProtocolHandler;
 import io.netty.handler.timeout.IdleStateEvent;
 import io.netty.util.AttributeKey;
 import java.io.IOException;
-import java.security.PublicKey;
 import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
-import java.util.HexFormat;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -26,6 +24,7 @@ import java.util.concurrent.ExecutorService;
 import org.nomad.bus.WakeBus;
 import org.nomad.core.DeviceAuth;
 import org.nomad.core.Envelope;
+import org.nomad.core.Hex;
 import org.nomad.core.Ids;
 import org.nomad.core.OneTimePrekey;
 import org.nomad.core.PrekeyBundle;
@@ -81,7 +80,7 @@ final class GatewayHandler extends SimpleChannelInboundHandler<TextWebSocketFram
         if (evt instanceof WebSocketServerProtocolHandler.HandshakeComplete) {
             byte[] n = new byte[16];
             RANDOM.nextBytes(n);
-            String nonce = HexFormat.of().formatHex(n);
+            String nonce = Hex.encode(n);
             ctx.channel().attr(NONCE).set(nonce);
             ObjectNode o = mapper.createObjectNode();
             o.put("t", "challenge");
@@ -194,9 +193,8 @@ final class GatewayHandler extends SimpleChannelInboundHandler<TextWebSocketFram
             return;
         }
         byte[] raw = Base64.getDecoder().decode(n.path("key").asText());
-        PublicKey key = DeviceAuth.publicKeyFromRaw(raw);
         byte[] sig = Base64.getDecoder().decode(n.path("sig").asText());
-        if (!DeviceAuth.verify(key, "NOMAD-WS-AUTH\n" + nonce, sig)) {
+        if (!DeviceAuth.verify(raw, "NOMAD-WS-AUTH\n" + nonce, sig)) {
             fail(ctx, "auth_failed", true);
             return;
         }

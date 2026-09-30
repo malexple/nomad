@@ -1,4 +1,8 @@
 dependencies {
     api project(':core')
+    api project(':crypto')
     api 'com.fasterxml.jackson.core:jackson-databind:2.17.2'
 }
+
+// shared with the Android app: no Java 18+ APIs
+tasks.withType(JavaCompile).configureEach { options.release = 17 }

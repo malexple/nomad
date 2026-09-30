@@ -3,7 +3,6 @@ package org.nomad.core;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
-import java.util.HexFormat;
 
 /** Identifier derivation. uid = base32(SHA-256(identity_pubkey))[0..26] (SPEC section 5). */
 public final class Ids {
@@ -24,7 +23,7 @@ public final class Ids {
         byte[] input = new byte[MAILBOX_DOMAIN.length + devicePublicKey.length];
         System.arraycopy(MAILBOX_DOMAIN, 0, input, 0, MAILBOX_DOMAIN.length);
         System.arraycopy(devicePublicKey, 0, input, MAILBOX_DOMAIN.length, devicePublicKey.length);
-        return HexFormat.of().formatHex(sha256(input));
+        return Hex.encode(sha256(input));
     }
 
     public static byte[] sha256(byte[] data) {

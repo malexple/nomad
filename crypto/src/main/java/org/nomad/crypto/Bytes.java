@@ -2,7 +2,7 @@ package org.nomad.crypto;
 
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
-import java.util.HexFormat;
+import org.nomad.core.Hex;
 
 final class Bytes {
     private Bytes() {}
@@ -30,7 +30,7 @@ final class Bytes {
     }
 
     static String hex(byte[] b) {
-        return HexFormat.of().formatHex(b);
+        return Hex.encode(b);
     }
 
     static byte[] ascii(String s) {

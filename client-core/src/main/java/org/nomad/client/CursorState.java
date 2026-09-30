@@ -3,6 +3,8 @@ package org.nomad.client;
 import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.UUID;
+import org.nomad.core.BinReader;
+import org.nomad.core.BinWriter;
 
 /**
  * Read position (epoch, seq) plus a bounded set of already seen envelope ids.
@@ -47,5 +49,22 @@ public final class CursorState {
             it.remove();
         }
         return added;
+    }
+
+    void writeTo(BinWriter w) {
+        w.i64(epoch).i64(seq).i32(seen.size());
+        for (UUID id : seen) {
+            w.i64(id.getMostSignificantBits()).i64(id.getLeastSignificantBits());
+        }
+    }
+
+    static CursorState readFrom(BinReader r) {
+        CursorState c = new CursorState(r.i64(), r.i64());
+        int n = r.count();
+        for (int i = 0; i < n; i++) {
+            long msb = r.i64();
+            c.seen.add(new UUID(msb, r.i64()));
+        }
+        return c;
     }
 }

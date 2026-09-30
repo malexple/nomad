@@ -2,7 +2,6 @@ package org.nomad.core;
 
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
-import java.security.PublicKey;
 
 /**
  * Public keys of one device. Two separate key pairs (not XEdDSA):
@@ -50,12 +49,7 @@ public record PrekeyBundle(
     }
 
     public boolean verifySignatures() {
-        try {
-            PublicKey k = DeviceAuth.publicKeyFromRaw(sigKey);
-            return DeviceAuth.verifyBytes(k, ikMessage(ikDh), sigIkDh)
-                    && DeviceAuth.verifyBytes(k, spkMessage(spkId, spk), sigSpk);
-        } catch (IllegalArgumentException e) {
-            return false;
-        }
+        return DeviceAuth.verifyBytes(sigKey, ikMessage(ikDh), sigIkDh)
+                && DeviceAuth.verifyBytes(sigKey, spkMessage(spkId, spk), sigSpk);
     }
 }

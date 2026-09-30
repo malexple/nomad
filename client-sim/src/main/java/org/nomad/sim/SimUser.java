@@ -5,7 +5,6 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.WebSocket;
 import java.nio.charset.StandardCharsets;
-import java.security.KeyPair;
 import java.util.ArrayDeque;
 import java.util.HashSet;
 import java.util.List;
@@ -21,11 +20,12 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
-import org.nomad.client.CursorState;
+import org.nomad.client.ClientState;
 import org.nomad.client.Received;
 import org.nomad.client.WsInbox;
 import org.nomad.client.WsProtocol;
 import org.nomad.core.DeviceAuth;
+import org.nomad.core.DeviceKeyPair;
 import org.nomad.core.Ids;
 import org.nomad.core.PrekeyBundle;
 import org.nomad.crypto.ConversationManager;
@@ -34,6 +34,7 @@ import org.nomad.crypto.Identity;
 
 /**
  * One emulated user: own key, one WebSocket connection to one node, optional end-to-end encryption and groups.
+ * All keys and sessions live in a ClientState, so the user can be "killed" (snapshot) and "restarted" from the snapshot.
  * All blocking work (prekey fetches, sends) runs on the user's own single io thread, never on the WebSocket
  * listener thread, so the listener can always deliver the replies that the io thread is waiting for.
  * When the node answers "rate_limited" the sends are queued and repeated slowly (below the node's limit),
@@ -58,57 +59,74 @@ final class SimUser implements WebSocket.Listener {
 
     final String name;
     final String url;
-    final KeyPair keys = DeviceAuth.generateKeyPair();
+    final DeviceKeyPair keys;
     final CompletableFuture<Void> ready = new CompletableFuture<>();
     final CompletableFuture<Void> published = new CompletableFuture<>();
     final AtomicInteger received = new AtomicInteger();
+    final AtomicInteger bundleFetches = new AtomicInteger();
     volatile String closedInfo;
 
     private final Stats stats;
     private final boolean encrypt;
+    private final boolean publishPrekeys;
+    private final ClientState state;
     private final Identity identity;
     private final ConversationManager convo;
     private final GroupManager groups;
+    private final WsInbox inbox;
     private final ExecutorService io;
     private final ConcurrentHashMap<String, CompletableFuture<PrekeyBundle>> bundles = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, String> inflight = new ConcurrentHashMap<>();
     private final ArrayDeque<String> backlog = new ArrayDeque<>();
     private final Set<String> backlogged = new HashSet<>();
     private boolean draining;
-    private final WsInbox inbox = new WsInbox(new CursorState());
     private final StringBuilder partial = new StringBuilder();
     private volatile WebSocket ws;
     private long lastAcked;
     private CompletableFuture<?> tail = CompletableFuture.completedFuture(null);
 
+    /** A new user with fresh keys. */
     SimUser(String name, String url, Stats stats, boolean encrypt) {
+        this(name, url, stats, encrypt, ClientState.fresh(DeviceAuth.generateKeyPair()), true);
+    }
+
+    /** A user restarted from a saved state: same keys, sessions, group chains and read cursor. */
+    SimUser(String name, String url, Stats stats, ClientState restored) {
+        this(name, url, stats, true, restored, false);
+    }
+
+    private SimUser(String name, String url, Stats stats, boolean encrypt, ClientState state, boolean publishPrekeys) {
         this.name = name;
         this.url = url;
         this.stats = stats;
         this.encrypt = encrypt;
-        this.identity = encrypt ? new Identity(keys) : null;
-        this.convo = encrypt ? new ConversationManager(identity) : null;
-        this.groups = encrypt ? new GroupManager(identity) : null;
+        this.publishPrekeys = publishPrekeys;
+        this.state = state;
+        this.identity = state.identity;
+        this.convo = state.conversations;
+        this.groups = state.groups;
+        this.inbox = state.inbox;
+        this.keys = state.identity.deviceKeys();
         this.io = Executors.newSingleThreadExecutor(r -> {
             Thread t = new Thread(r, "sim-io-" + name);
             t.setDaemon(true);
             return t;
         });
-        if (!encrypt) {
+        if (!encrypt || !publishPrekeys) {
             published.complete(null);
         }
     }
 
     String uid() {
-        return Ids.uid(DeviceAuth.rawPublicKey(keys.getPublic()));
+        return Ids.uid(keys.pub());
     }
 
     String mailboxId() {
-        return Ids.mailboxIdFor(DeviceAuth.rawPublicKey(keys.getPublic()));
+        return Ids.mailboxIdFor(keys.pub());
     }
 
     GroupManager.GroupMember asMember() {
-        return new GroupManager.GroupMember(DeviceAuth.rawPublicKey(keys.getPublic()));
+        return new GroupManager.GroupMember(keys.pub());
     }
 
     int heldCount() {
@@ -117,6 +135,11 @@ final class SimUser implements WebSocket.Listener {
 
     int unacknowledgedSends() {
         return inflight.size();
+    }
+
+    /** The sealed state, as it would be written to disk just before the process is killed. */
+    byte[] snapshot(byte[] masterKey) {
+        return state.seal(masterKey);
     }
 
     void connect(HttpClient http) {
@@ -195,6 +218,7 @@ final class SimUser implements WebSocket.Listener {
     }
 
     private PrekeyBundle fetchBundle(String uid) throws Exception {
+        bundleFetches.incrementAndGet();
         for (int attempt = 0; ; attempt++) {
             CompletableFuture<PrekeyBundle> f = bundles.computeIfAbsent(uid, k -> new CompletableFuture<>());
             try {
@@ -330,7 +354,7 @@ final class SimUser implements WebSocket.Listener {
             case "challenge" -> send(WsProtocol.auth(keys, n.path("nonce").asText()));
             case "auth_ok" -> {
                 ready.complete(null);
-                if (encrypt) {
+                if (encrypt && publishPrekeys) {
                     send(WsProtocol.pkPut(identity.publicBundle(), identity.generateOneTimePrekeys(20)));
                 }
                 send(WsProtocol.sync(inbox.afterSeq(), 100));
@@ -398,7 +422,7 @@ final class SimUser implements WebSocket.Listener {
             deliver(new String(x.payload(), StandardCharsets.UTF_8));
             return true;
         }
-        if (x.version() == 1 && convo != null) {
+        if (x.version() == 1 && encrypt) {
             Optional<ConversationManager.Decrypted> d = convo.decrypt(x.payload());
             if (d.isEmpty()) {
                 return false;
@@ -417,7 +441,7 @@ final class SimUser implements WebSocket.Listener {
             }
             return true;
         }
-        if (x.version() == 2 && groups != null) {
+        if (x.version() == 2 && encrypt) {
             Optional<GroupManager.GroupDecrypted> g = groups.decrypt(x.payload());
             if (g.isEmpty()) {
                 return false;
