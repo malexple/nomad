@@ -4,3 +4,8 @@ build/
 *.iml
 device.key
 cursor.txt
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/.idea/
