@@ -34,6 +34,7 @@ class WsGateway implements SmartLifecycle {
     private final PrekeyDirectory directory;
     private final WakeBus bus;
     private final ObjectMapper mapper;
+    private final Limits limits;
     private final Sessions sessions = new Sessions();
 
     private EventLoopGroup boss;
@@ -45,11 +46,18 @@ class WsGateway implements SmartLifecycle {
 
     WsGateway(
             @Value("${nomad.ws.port:8090}") int port,
+            @Value("${nomad.limits.send-per-sec:20}") double sendPerSec,
+            @Value("${nomad.limits.send-burst:50}") double sendBurst,
+            @Value("${nomad.limits.read-per-sec:50}") double readPerSec,
+            @Value("${nomad.limits.read-burst:100}") double readBurst,
+            @Value("${nomad.limits.pk-per-min:10}") double pkPerMin,
+            @Value("${nomad.limits.pk-target-per-min:3}") double pkTargetPerMin,
             MailboxStore store,
             PrekeyDirectory directory,
             WakeBus bus,
             ObjectMapper mapper) {
         this.port = port;
+        this.limits = new Limits(sendPerSec, sendBurst, readPerSec, readBurst, pkPerMin, pkTargetPerMin);
         this.store = store;
         this.directory = directory;
         this.bus = bus;
@@ -61,7 +69,7 @@ class WsGateway implements SmartLifecycle {
         exec = Executors.newVirtualThreadPerTaskExecutor();
         boss = new NioEventLoopGroup(1);
         workers = new NioEventLoopGroup();
-        GatewayHandler handler = new GatewayHandler(store, directory, bus, sessions, mapper, exec);
+        GatewayHandler handler = new GatewayHandler(store, directory, bus, sessions, mapper, exec, limits);
         ServerBootstrap b = new ServerBootstrap()
                 .group(boss, workers)
                 .channel(NioServerSocketChannel.class)
@@ -79,7 +87,7 @@ class WsGateway implements SmartLifecycle {
         server = b.bind(port).syncUninterruptibly().channel();
         unsubscribe = bus.subscribe(sessions::wake);
         running = true;
-        LOG.info("WebSocket gateway listening on ws://0.0.0.0:{}/v1/ws", port);
+        LOG.info("WebSocket gateway listening on ws://0.0.0.0:{}/v1/ws, limits {}", port, limits);
     }
 
     @Override

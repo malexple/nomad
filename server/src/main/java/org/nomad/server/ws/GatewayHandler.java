@@ -38,8 +38,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Text-frame JSON protocol, see docs/ws-protocol.md. Store calls block (JDBC), so messages are
- * handled on virtual threads and never on the Netty event loop.
+ * Text-frame JSON protocol, see docs/ws-protocol.md and docs/limits.md. Store calls block (JDBC), so messages are
+ * handled on virtual threads and never on the Netty event loop. Every authenticated device has a Limiter.
  */
 @ChannelHandler.Sharable
 final class GatewayHandler extends SimpleChannelInboundHandler<TextWebSocketFrame> {
@@ -47,6 +47,8 @@ final class GatewayHandler extends SimpleChannelInboundHandler<TextWebSocketFram
     private static final AttributeKey<String> NONCE = AttributeKey.valueOf("nonce");
     private static final AttributeKey<String> MAILBOX = AttributeKey.valueOf("mailbox");
     private static final AttributeKey<byte[]> KEY = AttributeKey.valueOf("key");
+    private static final AttributeKey<Limiter> LIMITER = AttributeKey.valueOf("limiter");
+    private static final int MAX_VIOLATIONS = 500;
     private static final SecureRandom RANDOM = new SecureRandom();
 
     private final MailboxStore store;
@@ -55,6 +57,7 @@ final class GatewayHandler extends SimpleChannelInboundHandler<TextWebSocketFram
     private final Sessions sessions;
     private final ObjectMapper mapper;
     private final ExecutorService exec;
+    private final Limits limits;
 
     GatewayHandler(
             MailboxStore store,
@@ -62,13 +65,15 @@ final class GatewayHandler extends SimpleChannelInboundHandler<TextWebSocketFram
             WakeBus bus,
             Sessions sessions,
             ObjectMapper mapper,
-            ExecutorService exec) {
+            ExecutorService exec,
+            Limits limits) {
         this.store = store;
         this.directory = directory;
         this.bus = bus;
         this.sessions = sessions;
         this.mapper = mapper;
         this.exec = exec;
+        this.limits = limits;
     }
 
     @Override
@@ -121,12 +126,33 @@ final class GatewayHandler extends SimpleChannelInboundHandler<TextWebSocketFram
             onAuth(ctx, n);
             return;
         }
+        Limiter limiter = ctx.channel().attr(LIMITER).get();
         switch (t) {
-            case "send" -> onSend(ctx, n);
-            case "sync" -> onSync(ctx, mailbox, n);
-            case "ack" -> onAck(ctx, mailbox, n);
-            case "pk_put" -> onPkPut(ctx, n);
-            case "pk_get" -> onPkGet(ctx, n);
+            case "send" -> {
+                if (!throttled(ctx, n, limiter.send(), limiter)) {
+                    onSend(ctx, n);
+                }
+            }
+            case "sync" -> {
+                if (!throttled(ctx, n, limiter.read(), limiter)) {
+                    onSync(ctx, mailbox, n);
+                }
+            }
+            case "ack" -> {
+                if (!throttled(ctx, n, limiter.read(), limiter)) {
+                    onAck(ctx, mailbox, n);
+                }
+            }
+            case "pk_put" -> {
+                if (!throttled(ctx, n, limiter.read(), limiter)) {
+                    onPkPut(ctx, n);
+                }
+            }
+            case "pk_get" -> {
+                if (!throttled(ctx, n, limiter.pkGet(n.path("uid").asText()), limiter)) {
+                    onPkGet(ctx, n);
+                }
+            }
             case "ping" -> {
                 ObjectNode o = mapper.createObjectNode();
                 o.put("t", "pong");
@@ -134,6 +160,31 @@ final class GatewayHandler extends SimpleChannelInboundHandler<TextWebSocketFram
             }
             default -> throw new IllegalArgumentException("unknown message type");
         }
+    }
+
+    /**
+     * Answers {"t":"error","msg":"rate_limited","retryMs":n} and echoes "id" (send) or "uid" (pk_get) so that
+     * the client knows what to repeat. A connection that keeps ignoring the limits is closed.
+     */
+    private boolean throttled(ChannelHandlerContext ctx, JsonNode request, long waitMs, Limiter limiter) {
+        if (waitMs <= 0) {
+            return false;
+        }
+        ObjectNode o = mapper.createObjectNode();
+        o.put("t", "error");
+        o.put("msg", "rate_limited");
+        o.put("retryMs", waitMs);
+        if (request.hasNonNull("id")) {
+            o.put("id", request.path("id").asText());
+        }
+        if (request.hasNonNull("uid")) {
+            o.put("uid", request.path("uid").asText());
+        }
+        var f = ctx.channel().writeAndFlush(new TextWebSocketFrame(o.toString()));
+        if (limiter.violation() > MAX_VIOLATIONS) {
+            f.addListener(ChannelFutureListener.CLOSE);
+        }
+        return true;
     }
 
     private void onAuth(ChannelHandlerContext ctx, JsonNode n) {
@@ -151,6 +202,7 @@ final class GatewayHandler extends SimpleChannelInboundHandler<TextWebSocketFram
         }
         String mailbox = Ids.mailboxIdFor(raw);
         ctx.channel().attr(KEY).set(raw);
+        ctx.channel().attr(LIMITER).set(new Limiter(limits));
         ctx.channel().attr(MAILBOX).set(mailbox);
         sessions.add(mailbox, ctx.channel());
         ctx.channel().closeFuture().addListener(f -> sessions.remove(mailbox, ctx.channel()));

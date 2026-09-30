@@ -16,6 +16,7 @@ final class Stats {
     final AtomicInteger sendAcks = new AtomicInteger();
     final AtomicInteger errors = new AtomicInteger();
     final AtomicInteger undecryptable = new AtomicInteger();
+    final AtomicInteger rateLimited = new AtomicInteger();
     final List<Long> latencies = Collections.synchronizedList(new ArrayList<>());
 
     void onReceive(String text, String receiver) {

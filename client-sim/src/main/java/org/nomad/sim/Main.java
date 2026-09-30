@@ -21,6 +21,8 @@ import java.util.concurrent.TimeUnit;
  * --poll-sec 0 disables the periodic sync (then only wake signals deliver: use it to test the bus).
  * --encrypt true: X3DH + Double Ratchet between all users (the node sees only ciphertext).
  * --group-size N (needs --encrypt true): the first N users form a group (u0 is the admin) with Sender Keys.
+ * Load test: a large --messages with --delay-ms 0 exceeds the node's per-device limits; the simulator backs off
+ * and repeats, so everything must still arrive (rateLimited shows how often the node said no).
  * Exit code 0 = everything delivered exactly once and decrypted, 1 = something is missing or duplicated.
  */
 public final class Main {
@@ -103,17 +105,20 @@ public final class Main {
             Thread.sleep(100);
             if (System.nanoTime() - lastPrint > 2_000_000_000L) {
                 lastPrint = System.nanoTime();
-                System.out.printf("  t=%.1fs delivered=%d/%d sendAcks=%d%n",
-                        (System.nanoTime() - started) / 1e9, stats.delivered.get(), expected, stats.sendAcks.get());
+                System.out.printf("  t=%.1fs delivered=%d/%d sendAcks=%d rateLimited=%d%n",
+                        (System.nanoTime() - started) / 1e9, stats.delivered.get(), expected,
+                        stats.sendAcks.get(), stats.rateLimited.get());
             }
         }
         double seconds = (System.nanoTime() - started) / 1e9;
         stats.undecryptable.set(list.stream().mapToInt(SimUser::heldCount).sum());
+        int unacked = list.stream().mapToInt(SimUser::unacknowledgedSends).sum();
 
         System.out.printf("expected=%d delivered=%d duplicates=%d sendAcks=%d errors=%d foreign=%d "
-                        + "stillHeldUndecryptable=%d%n",
+                        + "stillHeldUndecryptable=%d rateLimited=%d unackedSends=%d%n",
                 expected, stats.delivered.get(), stats.duplicates.get(), stats.sendAcks.get(),
-                stats.errors.get(), stats.foreign.get(), stats.undecryptable.get());
+                stats.errors.get(), stats.foreign.get(), stats.undecryptable.get(),
+                stats.rateLimited.get(), unacked);
         System.out.printf("latency ms: p50=%d p95=%d max=%d  total=%.2fs%n",
                 stats.percentile(0.50), stats.percentile(0.95), stats.percentile(1.0), seconds);
         System.out.println("per user (name, node, expected incoming, got, connection state):");

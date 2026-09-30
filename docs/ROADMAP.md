@@ -10,9 +10,9 @@ Priority = value for the family MVP divided by risk. Servers in RU are not chose
 | 1 | Netty WebSocket gateway, RedisWakeBus, simulator | done              | see "Results" below |
 | 4 | Prekey directory (uid to public keys) over WebSocket, PostgreSQL and in-memory | done              | encrypted simulator works across two nodes |
 | 5 | E2EE 1:1: X3DH + Double Ratchet (Bouncy Castle X25519, JCE for the rest) behind `E2eeSession` | done              | tests green, `--encrypt true` OK on 1 and 2 nodes |
-| 6 | Groups: Sender Keys, admin-only membership, signed messages, rotation on change; held messages instead of lost ones | done              | `GroupManagerTest` green; simulator `--encrypt true --group-size 4` prints `RESULT: OK` on two nodes |
-| 7 | Limits: token bucket per device, size buckets (padding), rate limit on `pk_get` | planned           | simulator at 10x load does not crash the node; OPK pool cannot be drained by one device |
-| 8 | Android client (Kotlin) MVP: keystore, SQLCipher (sessions and held messages persist), WebSocket, foreground connection | planned           | phone to CLI and back, offline delivery after reconnect, restart keeps sessions |
+| 6 | Groups: Sender Keys, admin-only membership, signed messages, rotation on change; held messages instead of lost ones | done              | `GroupManagerTest` green; `--encrypt true --group-size 5` OK on two nodes |
+| 7 | Limits (token bucket per device, prekey lookups per target) and padding to size buckets (docs/limits.md) | done              | tests green; load run with `--messages 200` finishes with `RESULT: OK` and `rateLimited` > 0; node alive |
+| 8 | Android client (Kotlin) MVP: keystore, SQLCipher (sessions and held messages persist), WebSocket, foreground connection | next              | phone to CLI and back, offline delivery after reconnect, restart keeps sessions |
 | 2 | Deploy a node: Dockerfile, compose, TLS via reverse proxy, WireGuard between servers | waits for servers | simulator from a laptop against the public address is OK |
 | 3 | PostgreSQL replication and a failover drill (docs/failover.md) | waits for servers | kill the primary, promote, epoch+1, the simulator recovers |
 | 9 | Push relay (RuStore/APNs/UnifiedPush) with push_id | planned           | message arrives with the app killed, the provider payload is empty |
@@ -31,18 +31,20 @@ Priority = value for the family MVP divided by risk. Servers in RU are not chose
 - The one-time prekey is spent only after the first message is authenticated (a forged first message must not burn it).
 - Groups (docs/groups.md): admin-only membership, every message signed by its sender, one copy per member.
 - A message that cannot be decrypted yet is held, and the acknowledgement stops below it (nothing is silently lost).
+- Limits are per device and answered with `rate_limited`; the client repeats slowly (docs/limits.md).
 - MLS stays possible later: the scheme version is in the envelope (`v`): 0 = dev plaintext, 1 = X3DH + Double Ratchet,
   2 = group message (Sender Keys).
 
 ## Results
-Step 1 (local, two nodes, PostgreSQL, Redis): 300/300 with wake only; Redis outage drills OK (see docs/failover.md
-and the simulator options `--poll-sec`, `--delay-ms`); a node starts without Redis.
-Steps 4 and 5: 3 users on one node, p50 16 ms; 6 users on two nodes, 120/120 encrypted, p50 263 ms, `undecryptable=0`.
+- Step 1 (local, two nodes, PostgreSQL, Redis): 300/300 with wake only; Redis outage drills OK; a node starts without Redis.
+- Steps 4 and 5: 3 users on one node, p50 16 ms; 6 users on two nodes, 120/120 encrypted, `undecryptable=0`.
+- Step 6: 4 users, group of 4, 80/80 on one node; 6 users, group of 5, 260/260 on two nodes (p50 912 ms in a burst),
+  nothing held at the end.
 
 ## Known gaps
 - The sender id is not hidden from the recipient's node in the initial pairwise header (sealed sender is later).
-- No padding yet (step 7). Session state and held messages are kept in memory only (SQLCipher in step 8).
-- Prekey requests are not rate limited yet (step 7).
+- Session state and held messages are kept in memory only (SQLCipher in step 8).
+- Many devices can still drain someone's one-time prekeys: registration must be gated (invitations).
 - Not audited. Do not use for anything that needs real secrecy.
 
 Rules for every step: a test or a script that proves it, a short note in docs/, a git tag.

@@ -6,14 +6,19 @@ import java.net.http.HttpClient;
 import java.net.http.WebSocket;
 import java.nio.charset.StandardCharsets;
 import java.security.KeyPair;
+import java.util.ArrayDeque;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.nomad.client.CursorState;
@@ -31,8 +36,26 @@ import org.nomad.crypto.Identity;
  * One emulated user: own key, one WebSocket connection to one node, optional end-to-end encryption and groups.
  * All blocking work (prekey fetches, sends) runs on the user's own single io thread, never on the WebSocket
  * listener thread, so the listener can always deliver the replies that the io thread is waiting for.
+ * When the node answers "rate_limited" the sends are queued and repeated slowly (below the node's limit),
+ * the prekey lookups wait for the given time.
  */
 final class SimUser implements WebSocket.Listener {
+    private static final ScheduledExecutorService BACKOFF = Executors.newSingleThreadScheduledExecutor(r -> {
+        Thread t = new Thread(r, "sim-backoff");
+        t.setDaemon(true);
+        return t;
+    });
+    private static final long DRAIN_INTERVAL_MS = 60;
+
+    private static final class RateLimited extends RuntimeException {
+        final long retryMs;
+
+        RateLimited(long retryMs) {
+            super("rate limited", null, false, false);
+            this.retryMs = retryMs;
+        }
+    }
+
     final String name;
     final String url;
     final KeyPair keys = DeviceAuth.generateKeyPair();
@@ -48,6 +71,10 @@ final class SimUser implements WebSocket.Listener {
     private final GroupManager groups;
     private final ExecutorService io;
     private final ConcurrentHashMap<String, CompletableFuture<PrekeyBundle>> bundles = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, String> inflight = new ConcurrentHashMap<>();
+    private final ArrayDeque<String> backlog = new ArrayDeque<>();
+    private final Set<String> backlogged = new HashSet<>();
+    private boolean draining;
     private final WsInbox inbox = new WsInbox(new CursorState());
     private final StringBuilder partial = new StringBuilder();
     private volatile WebSocket ws;
@@ -86,6 +113,10 @@ final class SimUser implements WebSocket.Listener {
 
     int heldCount() {
         return inbox.heldCount();
+    }
+
+    int unacknowledgedSends() {
+        return inflight.size();
     }
 
     void connect(HttpClient http) {
@@ -164,17 +195,58 @@ final class SimUser implements WebSocket.Listener {
     }
 
     private PrekeyBundle fetchBundle(String uid) throws Exception {
-        CompletableFuture<PrekeyBundle> f = bundles.computeIfAbsent(uid, k -> new CompletableFuture<>());
-        try {
-            send(WsProtocol.pkGet(uid));
-            return f.get(10, TimeUnit.SECONDS);
-        } finally {
-            bundles.remove(uid);
+        for (int attempt = 0; ; attempt++) {
+            CompletableFuture<PrekeyBundle> f = bundles.computeIfAbsent(uid, k -> new CompletableFuture<>());
+            try {
+                send(WsProtocol.pkGet(uid));
+                return f.get(10, TimeUnit.SECONDS);
+            } catch (ExecutionException e) {
+                if (e.getCause() instanceof RateLimited r && attempt < 8) {
+                    Thread.sleep(r.retryMs + 20);
+                    continue;
+                }
+                throw e;
+            } finally {
+                bundles.remove(uid);
+            }
         }
     }
 
+    /** Remembers the envelope until the node acknowledges it, so that a rate-limited send can be repeated. */
     private void sendEnvelope(String mailbox, int version, byte[] data) {
-        send(WsProtocol.send(UUID.randomUUID(), mailbox, version, data, WsProtocol.defaultExpiryDay()));
+        UUID id = UUID.randomUUID();
+        String json = WsProtocol.send(id, mailbox, version, data, WsProtocol.defaultExpiryDay());
+        inflight.put(id.toString(), json);
+        send(json);
+    }
+
+    private synchronized void onRateLimitedSend(String id, long retryMs) {
+        stats.rateLimited.incrementAndGet();
+        if (inflight.containsKey(id) && backlogged.add(id)) {
+            backlog.add(id);
+        }
+        if (!draining) {
+            draining = true;
+            BACKOFF.schedule(this::drain, retryMs, TimeUnit.MILLISECONDS);
+        }
+    }
+
+    /** Repeats queued sends one by one, slower than the node's limit. */
+    private void drain() {
+        String json = null;
+        synchronized (this) {
+            String id = backlog.poll();
+            if (id == null) {
+                draining = false;
+                return;
+            }
+            backlogged.remove(id);
+            json = inflight.get(id);
+        }
+        if (json != null) {
+            send(json);
+        }
+        BACKOFF.schedule(this::drain, DRAIN_INTERVAL_MS, TimeUnit.MILLISECONDS);
     }
 
     private static byte[] prefixed(byte kind, byte[] data) {
@@ -272,13 +344,33 @@ final class SimUser implements WebSocket.Listener {
                     .completeExceptionally(new IllegalStateException("no prekey bundle for " + n.path("uid").asText()));
             case "wake" -> send(WsProtocol.sync(inbox.afterSeq(), 100));
             case "msgs" -> onMsgs(n);
-            case "ack" -> stats.sendAcks.incrementAndGet();
-            case "acked", "pong" -> { }
-            case "error" -> {
-                stats.errors.incrementAndGet();
-                System.err.println(name + ": server error " + n.path("msg").asText());
+            case "ack" -> {
+                inflight.remove(n.path("id").asText());
+                stats.sendAcks.incrementAndGet();
             }
+            case "acked", "pong" -> { }
+            case "error" -> onServerError(n);
             default -> System.err.println(name + ": unknown message " + msg);
+        }
+    }
+
+    private void onServerError(JsonNode n) {
+        if (!"rate_limited".equals(n.path("msg").asText())) {
+            stats.errors.incrementAndGet();
+            System.err.println(name + ": server error " + n.path("msg").asText());
+            return;
+        }
+        long retry = n.path("retryMs").asLong(100);
+        if (n.hasNonNull("uid")) {
+            stats.rateLimited.incrementAndGet();
+            bundles.computeIfAbsent(n.path("uid").asText(), k -> new CompletableFuture<>())
+                    .completeExceptionally(new RateLimited(retry));
+        } else if (n.hasNonNull("id")) {
+            onRateLimitedSend(n.path("id").asText(), retry);
+        } else {
+            stats.rateLimited.incrementAndGet();
+            lastAcked = 0;
+            BACKOFF.schedule(this::syncNow, retry, TimeUnit.MILLISECONDS);
         }
     }
 

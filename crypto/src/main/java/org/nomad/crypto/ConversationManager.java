@@ -12,6 +12,7 @@ import org.nomad.core.PrekeyBundle;
  * All sessions of one device. Several sessions per peer are allowed (both sides may start a conversation
  * at the same time); the most recently used one sends. Incoming messages do not carry a sender id, so
  * "normal" messages are tried against the sessions (the failed attempts leave no trace).
+ * Plaintexts are padded to size buckets before encryption (see Padding).
  */
 public final class ConversationManager {
     public record Decrypted(String peerUid, byte[] plaintext) {}
@@ -49,7 +50,7 @@ public final class ConversationManager {
         if (l != null) {
             for (RatchetSession s : l) {
                 if (s.canSend()) {
-                    return s.encrypt(plaintext);
+                    return s.encrypt(Padding.pad(plaintext));
                 }
             }
         }
@@ -67,7 +68,7 @@ public final class ConversationManager {
             for (List<RatchetSession> l : byPeer.values()) {
                 for (RatchetSession s : new ArrayList<>(l)) {
                     try {
-                        byte[] pt = s.decrypt(wire);
+                        byte[] pt = Padding.unpad(s.decrypt(wire));
                         l.remove(s);
                         l.add(0, s);
                         return Optional.of(new Decrypted(s.peerUid(), pt));
@@ -89,7 +90,7 @@ public final class ConversationManager {
         if (known != null) {
             for (RatchetSession s : known) {
                 if (s.matchesHandshake(h.ekA())) {
-                    byte[] pt = s.decrypt(wire);
+                    byte[] pt = Padding.unpad(s.decrypt(wire));
                     known.remove(s);
                     known.add(0, s);
                     return Optional.of(new Decrypted(peer, pt));
@@ -97,7 +98,7 @@ public final class ConversationManager {
             }
         }
         RatchetSession fresh = RatchetSession.accept(me, h);
-        byte[] pt = fresh.decrypt(wire);
+        byte[] pt = Padding.unpad(fresh.decrypt(wire));
         // authenticated: only now the one-time prekey is spent and the session is stored
         if (h.opkId() >= 0) {
             me.discardOneTimePrekey(h.opkId());

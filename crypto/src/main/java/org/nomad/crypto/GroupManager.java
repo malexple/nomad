@@ -17,7 +17,8 @@ import org.nomad.core.Ids;
  * Group chats with Sender Keys (up to MAX_MEMBERS members, one admin).
  * - Every member has its own sending chain per generation (chainId, chain key, iteration).
  * - Chains are delivered to the other members through the pairwise sessions (control messages, see below).
- * - Group messages are encrypted once, signed with the sender's Ed25519 identity key and sent as one copy per member.
+ * - Group messages are padded to size buckets, encrypted once, signed with the sender's Ed25519 identity key
+ *   and sent as one copy per member.
  * - Any membership change (admin only) raises the generation: all members create new chains, so a removed
  *   member cannot read new messages and is no longer accepted as a sender.
  * This class does no networking: it returns Outbound items that the caller sends through a ConversationManager.
@@ -395,7 +396,7 @@ public final class GroupManager {
         c.ck = Hkdf.hmac(c.ck, TWO);
         int iteration = c.iteration++;
         byte[] aad = Bytes.concat(g.groupId, c.chainId, Bytes.intBE(iteration));
-        byte[] ct = Aead.crypt(true, mk, INFO_GROUP, plaintext, aad);
+        byte[] ct = Aead.crypt(true, mk, INFO_GROUP, Padding.pad(plaintext), aad);
         byte[] sig = DeviceAuth.signBytes(
                 me.sigKeyPair().getPrivate(),
                 Bytes.concat(SIG_DOMAIN, g.groupId, c.chainId, Bytes.intBE(iteration), ct));
@@ -433,7 +434,7 @@ public final class GroupManager {
                     return Optional.empty();
                 }
                 byte[] aad = Bytes.concat(g.groupId, chainId, Bytes.intBE(iteration));
-                byte[] pt = c.open(iteration, ct, aad);
+                byte[] pt = Padding.unpad(c.open(iteration, ct, aad));
                 return Optional.of(new GroupDecrypted(g.groupHex, c.senderUid, pt));
             }
             return Optional.empty();
