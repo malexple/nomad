@@ -3,6 +3,7 @@ package org.nomad.server;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import org.nomad.bus.LocalWakeBus;
+import org.nomad.bus.RedisWakeBus;
 import org.nomad.bus.WakeBus;
 import org.nomad.mailbox.InMemoryMailboxStore;
 import org.nomad.mailbox.MailboxStore;
@@ -38,7 +39,14 @@ class StoreConfig {
     }
 
     @Bean
-    WakeBus wakeBus() {
+    @ConditionalOnProperty(name = "nomad.bus", havingValue = "local", matchIfMissing = true)
+    WakeBus localBus() {
         return new LocalWakeBus();
+    }
+
+    @Bean
+    @ConditionalOnProperty(name = "nomad.bus", havingValue = "redis")
+    WakeBus redisBus(@Value("${nomad.redis.uri}") String uri) {
+        return new RedisWakeBus(uri);
     }
 }

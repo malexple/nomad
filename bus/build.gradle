@@ -1,1 +1,3 @@
-// no dependencies; the Redis implementation is added later as a separate class
+dependencies {
+    implementation 'io.lettuce:lettuce-core:6.3.2.RELEASE'
+}

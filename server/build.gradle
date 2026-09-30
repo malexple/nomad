@@ -9,6 +9,9 @@ dependencies {
     implementation project(':bus')
     implementation 'org.springframework.boot:spring-boot-starter-web'
     implementation 'com.zaxxer:HikariCP'
+    implementation 'io.netty:netty-transport'
+    implementation 'io.netty:netty-handler'
+    implementation 'io.netty:netty-codec-http'
     runtimeOnly 'org.postgresql:postgresql'
     testImplementation 'org.springframework.boot:spring-boot-starter-test'
 }

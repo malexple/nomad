@@ -1,0 +1,11 @@
+plugins {
+    id 'application'
+}
+
+dependencies {
+    implementation project(':client-core')
+}
+
+application {
+    mainClass = 'org.nomad.sim.Main'
+}
