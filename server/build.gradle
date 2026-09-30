@@ -1,0 +1,14 @@
+plugins {
+    id 'org.springframework.boot'
+    id 'io.spring.dependency-management'
+}
+
+dependencies {
+    implementation project(':core')
+    implementation project(':mailbox')
+    implementation project(':bus')
+    implementation 'org.springframework.boot:spring-boot-starter-web'
+    implementation 'com.zaxxer:HikariCP'
+    runtimeOnly 'org.postgresql:postgresql'
+    testImplementation 'org.springframework.boot:spring-boot-starter-test'
+}

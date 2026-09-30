@@ -1,0 +1,4 @@
+dependencies {
+    api project(':core')
+    // only java.sql (JDK); the pool and the PostgreSQL driver live in :server
+}

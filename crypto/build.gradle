@@ -1,0 +1,4 @@
+dependencies {
+    // Bouncy Castle (X25519, HKDF, AES-GCM / ChaCha20-Poly1305) is added in the next step
+    api project(':core')
+}

@@ -1,0 +1,12 @@
+plugins {
+    id 'application'
+}
+
+dependencies {
+    implementation project(':client-core')
+    implementation project(':crypto')
+}
+
+application {
+    mainClass = 'org.nomad.cli.Main'
+}
