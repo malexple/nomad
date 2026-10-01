@@ -263,6 +263,26 @@ public final class NomadEngine {
         return done;
     }
 
+    public CompletableFuture<String> createGroup(String name, List<GroupManager.GroupMember> others) {
+        CompletableFuture<String> done = new CompletableFuture<>();
+        post(() -> {
+            try {
+                GroupManager.CreatedGroup g = groups.createGroup(name, others);
+                if (!persistNow()) {
+                    throw new IOException("cannot save the new group");
+                }
+                for (GroupManager.Outbound o : g.outbound()) {
+                    sendPairwise(o.toUid(), o.toMailbox(), o.plaintext(), null);
+                }
+                safe(listener::onGroupsChanged);
+                done.complete(g.groupId());
+            } catch (IOException | RuntimeException e) {
+                done.completeExceptionally(e);
+            }
+        });
+        return done;
+    }
+
     /** Sends a group message; waits (in memory) until the group's keys exist on this device. */
     public CompletableFuture<Void> sendGroup(String groupId, byte[] text) {
         CompletableFuture<Void> done = new CompletableFuture<>();

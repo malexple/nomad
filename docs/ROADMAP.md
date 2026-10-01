@@ -4,26 +4,27 @@ Principle: small steps, every step ends with a check that anyone can repeat.
 Priority = value for the family MVP divided by risk. Servers in RU are not chosen yet, so local work
 (keys, encryption, groups, Android) goes before deployment.
 
-| # | Step | Status | Acceptance check |
-|---|---|---|---|
-| 0 | Skeleton, REST, mailbox | done | `./gradlew test` is green |
-| 1 | Netty WebSocket gateway, RedisWakeBus, simulator | done | see "Results" |
-| 4 | Prekey directory over WebSocket, PostgreSQL and in-memory | done | encrypted simulator works across two nodes |
-| 5 | E2EE 1:1: X3DH + Double Ratchet behind `E2eeSession` | done | tests green, simulator OK on 1 and 2 nodes |
-| 6 | Groups: Sender Keys, admin-only membership, signed messages, rotation | done | `GroupManagerTest` green; `--group-size 5` OK on two nodes |
-| 7 | Limits (token bucket per device, prekey lookups per target), padding | done | load run `--messages 200`: `RESULT: OK`, `rateLimited` > 0 |
-| 8.0 | Portability of the shared modules | done | tests green; simulator unchanged |
-| 8.1 | State persistence (docs/state.md) | done | `--restart-user 2` run: 160/160, 0 bundles fetched after restart |
-| 8.2 | Android project (docs/android.md): Keystore master key, encrypted state file, on-device self-test | done | `DeviceCryptoTest` 2/2 on Galaxy Note 10 (Android 12); self-test screen 5 x PASS |
-| 8.3a | Client engine `NomadEngine` in client-core (docs/engine.md); the simulator rewritten on top of it; `OkHttpTransport` for Android | in progress | `NomadEngineTest` green; all simulator checks (2 nodes, group, restart, load) give `RESULT: OK` on the engine |
-| 8.3b | First screens (Compose, Russian): identity and invitation link, adding a contact by link, chat list, chat, group creation; connection while the app is open | next | phone to simulator user and back over the home Wi-Fi, offline delivery after reconnect |
+| # | Step | Status            | Acceptance check |
+|---|---|-------------------|---|
+| 0 | Skeleton, REST, mailbox | done              | `./gradlew test` is green |
+| 1 | Netty WebSocket gateway, RedisWakeBus, simulator | done              | see "Results" |
+| 4 | Prekey directory over WebSocket, PostgreSQL and in-memory | done              | encrypted simulator works across two nodes |
+| 5 | E2EE 1:1: X3DH + Double Ratchet behind `E2eeSession` | done              | tests green, simulator OK on 1 and 2 nodes |
+| 6 | Groups: Sender Keys, admin-only membership, signed messages, rotation | done              | `GroupManagerTest` green; `--group-size 5` OK on two nodes |
+| 7 | Limits (token bucket per device, prekey lookups per target), padding | done              | load run `--messages 200`: `RESULT: OK`, `rateLimited` > 0 |
+| 8.0 | Portability of the shared modules | done              | tests green; simulator unchanged |
+| 8.1 | State persistence (docs/state.md) | done              | `--restart-user 2` run: 160/160, 0 bundles fetched after restart |
+| 8.2 | Android project (docs/android.md): Keystore master key, encrypted state file, on-device self-test | done              | `DeviceCryptoTest` 2/2 on Galaxy Note 10 (Android 12); self-test screen 5 x PASS |
+| 8.3a | Client engine `NomadEngine` (docs/engine.md); the simulator on top of it; `OkHttpTransport` | done              | simulator checks on the engine: 160/160 with a restart, 1720/1720 under load with a restart and 610 refusals; phone self-test 5 x PASS; `assembleDebug` builds |
+| 8.3b | The first screens in Russian (docs/app.md): profile and invitation link, add a contact by link, chat list, chat, group creation; `ChatStore`, `Invite`, echo bot for testing | done              | the test plan of docs/app.md on the phone and the tablet |
+| 8.4 | QR code for invitations (show and scan), notifications while the app is open, member management of groups, the node address from an invitation | next              | two devices are paired by scanning |
 | 2 | Deploy a node: Dockerfile, compose, TLS via reverse proxy, WireGuard between servers | waits for servers | simulator from a laptop against the public address is OK |
 | 3 | PostgreSQL replication and a failover drill (docs/failover.md) | waits for servers | kill the primary, promote, epoch+1, the simulator recovers |
-| 9 | Push relay (RuStore/APNs/UnifiedPush) with push_id, background connection | planned | message arrives with the app killed, the provider payload is empty |
-| 10 | Media and voice: encrypted blobs with TTL | planned | 5 MB file goes through, the node stores an opaque blob |
-| 11 | Modes "Simple" and "Guardian", first client analyzer | planned | parent sees a signal without the message text |
-| 12 | Transport plugins and bridges | planned | switching transport by probe(), tested with a blocked port |
-| 13 | Transparency log and witnesses | later | needed only with outside users |
+| 9 | Push relay (RuStore/APNs/UnifiedPush) with push_id, background connection | planned           | message arrives with the app killed, the provider payload is empty |
+| 10 | Media and voice: encrypted blobs with TTL | planned           | 5 MB file goes through, the node stores an opaque blob |
+| 11 | Modes "Simple" and "Guardian", first client analyzer | planned           | parent sees a signal without the message text |
+| 12 | Transport plugins and bridges | planned           | switching transport by probe(), tested with a blocked port |
+| 13 | Transparency log and witnesses | later             | needed only with outside users |
 
 ## Decisions
 - Two separate key pairs per device: Ed25519 (identity, signing, uid) and X25519 (identity for X3DH).
@@ -42,7 +43,8 @@ Priority = value for the family MVP divided by risk. Servers in RU are not chose
   source folders; minSdk 30 (Android 11); the master key of the state file is wrapped by the Android Keystore; no backup.
 - One client engine (docs/engine.md): a single thread, a tiny `Transport` interface, an outbox that is part of the saved state.
   The plaintext scheme v0 is gone: everything is encrypted.
-- Invitations: a link that carries the node address and the public signing key; shown as text and as QR (scanning later).
+- Invitations (`Invite`): a link nomad://invite?k=KEY&n=NAME&s=NODE (base64url), public, sent through any messenger; QR later.
+- What the user sees (contacts, messages, group names, settings) is a second sealed file (`ChatStore`, chats.bin), separate from the keys.
 - The app is in Russian; the connection lives while the app is open (background work comes with push, step 9).
 - MLS stays possible later: the scheme version is in the envelope (`v`): 1 = X3DH + Double Ratchet, 2 = group message (Sender Keys).
 
@@ -52,13 +54,17 @@ Priority = value for the family MVP divided by risk. Servers in RU are not chose
 - Step 6: 6 users, group of 5, 260/260 on two nodes; nothing held at the end.
 - Step 7: normal run 160/160 with `rateLimited=0`; load runs 1200/1200 and 1300/1300 with about 870-890 refusals.
 - Step 8.1: user 2 killed and restarted from its saved state in the middle of the run: 160/160, 0 bundles fetched after the restart.
-- Step 8.2: Galaxy Note 10 (SM-N971N, Android 12): 2/2 instrumented tests, self-test screen all PASS (9, 8, 122, 68 ms).
+- Step 8.2: Galaxy Note 10 (SM-N971N, Android 12): 2/2 instrumented tests, self-test screen all PASS.
+- Step 8.3a: on the engine, 4 users with a group and a restart: 160/160; with 200 messages per user: 1720/1720, 610 refusals,
+  `unackedSends=0`; the phone passes the self-test again after clearing the old state.
 
 ## Known gaps
 - The sender id is not hidden from the recipient's node in the initial pairwise header (sealed sender is later).
 - Many devices can still drain someone's one-time prekeys: registration must be gated (invitations).
 - If the Keystore key of the device is lost, the state cannot be opened (by design there is no silent new identity);
   a recovery path (invitation again, new identity announced to the contacts) is still to be designed.
+- If the node loses its prekey directory (in-memory store restarted), the devices do not republish: use PostgreSQL;
+  the engine should republish when the node reports that it knows nobody (to do).
 - Not audited. Do not use for anything that needs real secrecy.
 
 Rules for every step: a test or a script that proves it, a short note in docs/, a git tag.

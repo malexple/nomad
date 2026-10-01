@@ -19,7 +19,7 @@ import org.nomad.crypto.StateVault;
  */
 public final class ClientState {
     private static final byte[] MAGIC = {'N', 'M', 'D', '1'};
-    private static final int FORMAT = 2;
+    private static final int FORMAT = 3;
 
     public final Identity identity;
     public final ConversationManager conversations;

@@ -1,6 +1,7 @@
 package org.nomad.crypto;
 
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -23,8 +24,11 @@ import org.nomad.core.Ids;
  *   and sent as one copy per member.
  * - Any membership change (admin only) raises the generation: all members create new chains, so a removed
  *   member cannot read new messages and is no longer accepted as a sender.
+ * - The group name is chosen by the admin and travels to every member inside GROUP_STATE.
  * This class does no networking: it returns Outbound items that the caller sends through a ConversationManager.
  * Control plaintexts: 0x01 chat text (application), 0x10 GROUP_STATE, 0x11 SENDER_KEY.
+ * GROUP_STATE: kind | groupId(16) | generation(4) | nameLength(2) | name (UTF-8) | memberCount(1) | member keys(32 each)
+ *              | chainId(16) | chain key(32) | iteration(4).
  * Group wire: chainId(16) | iteration(4) | ciphertext+tag | signature(64).
  */
 public final class GroupManager {
@@ -32,6 +36,7 @@ public final class GroupManager {
     static final byte KIND_GROUP_STATE = 0x10;
     static final byte KIND_SENDER_KEY = 0x11;
     public static final int MAX_MEMBERS = 10;
+    public static final int MAX_NAME_BYTES = 120;
 
     private static final int MAX_SKIP = 1000;
     private static final int MAX_STORED_SKIPPED = 2000;
@@ -68,8 +73,8 @@ public final class GroupManager {
 
     public record GroupDecrypted(String groupId, String senderUid, byte[] plaintext) {}
 
-    /** For the user interface: members include this device and the admin. */
-    public record GroupInfo(String groupId, String adminUid, int generation, List<GroupMember> members) {}
+    /** For the user interface: members include this device and the admin; name is chosen by the admin ("" if none). */
+    public record GroupInfo(String groupId, String adminUid, int generation, String name, List<GroupMember> members) {}
 
     private static final class SenderChain {
         final byte[] chainId;
@@ -149,6 +154,7 @@ public final class GroupManager {
         final String groupHex;
         String adminUid;
         int generation;
+        String name = "";
         final LinkedHashMap<String, byte[]> members = new LinkedHashMap<>();
         SenderChain mine;
         final Map<String, ReceiveChain> recv = new HashMap<>();
@@ -169,15 +175,29 @@ public final class GroupManager {
         this.me = me;
     }
 
+    /** Trims the name and cuts it so that it fits into MAX_NAME_BYTES of UTF-8. */
+    static String cleanName(String name) {
+        String s = name == null ? "" : name.trim();
+        while (s.getBytes(StandardCharsets.UTF_8).length > MAX_NAME_BYTES) {
+            s = s.substring(0, s.length() - 1);
+        }
+        return s;
+    }
+
     // ---------------------------------------------------------------- admin operations
 
     public synchronized CreatedGroup createGroup(List<GroupMember> others) {
+        return createGroup("", others);
+    }
+
+    public synchronized CreatedGroup createGroup(String name, List<GroupMember> others) {
         checkMembers(others);
         byte[] gid = new byte[16];
         RANDOM.nextBytes(gid);
         Group g = new Group(gid);
         g.adminUid = me.uid();
         g.generation = 1;
+        g.name = cleanName(name);
         g.members.put(me.uid(), me.sigPub());
         for (GroupMember m : others) {
             g.members.put(m.uid(), m.sigKey());
@@ -187,8 +207,13 @@ public final class GroupManager {
         return new CreatedGroup(g.groupHex, broadcastState(g));
     }
 
-    /** Admin only: sets the list of other members (adds and removes) and rotates all sender keys. */
+    /** Admin only: sets the list of other members (adds and removes) and rotates all sender keys. The name stays. */
     public synchronized List<Outbound> updateMembers(String groupId, List<GroupMember> others) {
+        return updateGroup(groupId, null, others);
+    }
+
+    /** Admin only: new members and/or a new name (null keeps the name) and a new generation with fresh sender keys. */
+    public synchronized List<Outbound> updateGroup(String groupId, String newName, List<GroupMember> others) {
         Group g = groups.get(groupId);
         if (g == null) {
             throw new IllegalArgumentException("unknown group");
@@ -198,6 +223,9 @@ public final class GroupManager {
         }
         checkMembers(others);
         g.generation++;
+        if (newName != null) {
+            g.name = cleanName(newName);
+        }
         g.members.clear();
         g.members.put(me.uid(), me.sigPub());
         for (GroupMember m : others) {
@@ -260,6 +288,13 @@ public final class GroupManager {
         byte[] gid = new byte[16];
         b.get(gid);
         int gen = b.getInt();
+        int nameLength = b.getShort() & 0xffff;
+        if (nameLength > MAX_NAME_BYTES) {
+            return List.of();
+        }
+        byte[] nameBytes = new byte[nameLength];
+        b.get(nameBytes);
+        String name = new String(nameBytes, StandardCharsets.UTF_8);
         int count = b.get() & 0xff;
         if (count < 2 || count > MAX_MEMBERS) {
             return List.of();
@@ -298,6 +333,7 @@ public final class GroupManager {
             return List.of();
         }
         g.generation = gen;
+        g.name = name;
         g.members.clear();
         g.members.putAll(members);
         prune(g);
@@ -357,8 +393,11 @@ public final class GroupManager {
     }
 
     private byte[] encodeState(Group g) {
-        ByteBuffer b = ByteBuffer.allocate(1 + 16 + 4 + 1 + 32 * g.members.size() + 16 + 32 + 4);
-        b.put(KIND_GROUP_STATE).put(g.groupId).putInt(g.generation).put((byte) g.members.size());
+        byte[] nameBytes = g.name.getBytes(StandardCharsets.UTF_8);
+        ByteBuffer b = ByteBuffer.allocate(
+                1 + 16 + 4 + 2 + nameBytes.length + 1 + 32 * g.members.size() + 16 + 32 + 4);
+        b.put(KIND_GROUP_STATE).put(g.groupId).putInt(g.generation).putShort((short) nameBytes.length).put(nameBytes);
+        b.put((byte) g.members.size());
         for (byte[] k : g.members.values()) {
             b.put(k);
         }
@@ -392,7 +431,7 @@ public final class GroupManager {
             for (byte[] key : g.members.values()) {
                 members.add(new GroupMember(key));
             }
-            out.add(new GroupInfo(g.groupHex, g.adminUid, g.generation, members));
+            out.add(new GroupInfo(g.groupHex, g.adminUid, g.generation, g.name, members));
         }
         return out;
     }
@@ -474,7 +513,7 @@ public final class GroupManager {
     public synchronized void writeTo(BinWriter w) {
         w.i32(groups.size());
         for (Group g : groups.values()) {
-            w.bytes(g.groupId).str(g.adminUid).i32(g.generation);
+            w.bytes(g.groupId).str(g.adminUid).i32(g.generation).str(g.name);
             w.i32(g.members.size());
             for (byte[] key : g.members.values()) {
                 w.bytes(key);
@@ -509,6 +548,7 @@ public final class GroupManager {
             Group g = new Group(r.bytes());
             g.adminUid = r.str();
             g.generation = r.i32();
+            g.name = r.str();
             int members = r.count();
             for (int j = 0; j < members; j++) {
                 byte[] key = r.bytes();

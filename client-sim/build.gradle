@@ -4,9 +4,17 @@ plugins {
 
 dependencies {
     implementation project(':client-core')
-    implementation project(':crypto')
 }
 
 application {
     mainClass = 'org.nomad.sim.Main'
+}
+
+// A chat partner on the computer for tests with the phone: ./gradlew :client-sim:bot --args="--url ws://localhost:8090/v1/ws"
+tasks.register('bot', JavaExec) {
+    group = 'application'
+    description = 'Runs the echo bot (a development chat partner)'
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'org.nomad.sim.EchoBot'
+    workingDir = layout.projectDirectory.dir('..').asFile
 }

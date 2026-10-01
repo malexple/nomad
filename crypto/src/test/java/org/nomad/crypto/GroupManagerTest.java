@@ -274,10 +274,11 @@ class GroupManagerTest {
         String gid = created(w, a, bb, c);
 
         // c pretends to be the admin and tells b that the group has a new generation without b
-        byte[] spoof = ByteBuffer.allocate(1 + 16 + 4 + 1 + 32 * 2 + 16 + 32 + 4)
+        byte[] spoof = ByteBuffer.allocate(1 + 16 + 4 + 2 + 1 + 32 * 2 + 16 + 32 + 4)
                 .put(GroupManager.KIND_GROUP_STATE)
                 .put(HexFormat.of().parseHex(gid))
                 .putInt(99)
+                .putShort((short) 0)
                 .put((byte) 2)
                 .put(a.id.sigPub())
                 .put(c.id.sigPub())
