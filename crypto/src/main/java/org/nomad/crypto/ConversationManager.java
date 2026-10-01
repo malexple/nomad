@@ -17,7 +17,8 @@ import org.nomad.core.PrekeyBundle;
  * Plaintexts are padded to size buckets before encryption (see Padding).
  */
 public final class ConversationManager {
-    public record Decrypted(String peerUid, byte[] plaintext) {}
+    /** peerSigKey is the Ed25519 identity key of the sender (the mailbox of the peer is derived from it). */
+    public record Decrypted(String peerUid, byte[] peerSigKey, byte[] plaintext) {}
 
     private final Identity me;
     private final Map<String, List<RatchetSession>> byPeer = new HashMap<>();
@@ -73,7 +74,7 @@ public final class ConversationManager {
                         byte[] pt = Padding.unpad(s.decrypt(wire));
                         l.remove(s);
                         l.add(0, s);
-                        return Optional.of(new Decrypted(s.peerUid(), pt));
+                        return Optional.of(new Decrypted(s.peerUid(), s.peerSigKey(), pt));
                     } catch (DecryptionException e) {
                         // not this session
                     }
@@ -95,7 +96,7 @@ public final class ConversationManager {
                     byte[] pt = Padding.unpad(s.decrypt(wire));
                     known.remove(s);
                     known.add(0, s);
-                    return Optional.of(new Decrypted(peer, pt));
+                    return Optional.of(new Decrypted(peer, s.peerSigKey(), pt));
                 }
             }
         }
@@ -106,7 +107,7 @@ public final class ConversationManager {
             me.discardOneTimePrekey(h.opkId());
         }
         byPeer.computeIfAbsent(peer, k -> new ArrayList<>()).add(0, fresh);
-        return Optional.of(new Decrypted(peer, pt));
+        return Optional.of(new Decrypted(peer, fresh.peerSigKey(), pt));
     }
 
     // ---------------------------------------------------------------- persistence

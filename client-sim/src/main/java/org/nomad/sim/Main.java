@@ -1,32 +1,32 @@
 package org.nomad.sim;
 
-import java.net.http.HttpClient;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import org.nomad.client.ClientState;
+import org.nomad.client.NomadEngine;
 import org.nomad.crypto.StateVault;
 
 /**
  * Emulates N users spread over one or more gateway nodes; every user sends M direct messages to the others,
  * optionally one group chat is created and each member sends K group messages. The tool checks exactly-once
- * delivery, prints latency percentiles and a per-user table.
+ * delivery, prints latency percentiles and a per-user table. Each user is a NomadEngine, the same client
+ * code that runs in the Android app (everything is end-to-end encrypted).
  *
  * args: --urls ws://h1:8090/v1/ws,ws://h2:8091/v1/ws  --users 5  --messages 20  --timeout 30  --delay-ms 0
- *       --poll-sec 5  --encrypt false  --group-size 0  --group-messages 5  --restart-user -1
- * --poll-sec 0 disables the periodic sync (then only wake signals deliver: use it to test the bus).
- * --encrypt true: X3DH + Double Ratchet between all users (the node sees only ciphertext).
- * --group-size N (needs --encrypt true): the first N users form a group (u0 is the admin) with Sender Keys.
- * --restart-user I (needs --encrypt true): after the first round user I is "killed" (state saved, connection closed),
- *   the others send a second round while it is offline, then it restarts from the saved state and sends its second round.
+ *       --poll-sec 5  --pace-ms 0  --group-size 0  --group-messages 5  --restart-user -1
+ * --poll-sec: period of the safety-net sync (0 = off, then only wake signals deliver: use it to test the bus).
+ * --pace-ms: minimal gap between two frames of one user (0 = as fast as possible; the engine slows down by itself
+ *   after "rate_limited" answers).
+ * --group-size N: the first N users form a group (u0 is the admin) with Sender Keys.
+ * --restart-user I: after the first round user I is "killed" (state saved, engine stopped), the others send a second
+ *   round while it is offline, then it restarts from the saved state and sends its second round.
  *   Nothing may be lost and the restarted user must not need a new prekey bundle for peers it already knew.
- * Load test: a large --messages with --delay-ms 0 exceeds the node's per-device limits; the simulator backs off
+ * Load test: a large --messages with --delay-ms 0 exceeds the node's per-device limits; the engine backs off
  * and repeats, so everything must still arrive (rateLimited shows how often the node said no).
  * Exit code 0 = everything delivered exactly once and decrypted, 1 = something is missing or duplicated.
  */
@@ -39,40 +39,30 @@ public final class Main {
         int timeoutSec = Integer.parseInt(a.getOrDefault("timeout", "30"));
         long delayMs = Long.parseLong(a.getOrDefault("delay-ms", "0"));
         int pollSec = Integer.parseInt(a.getOrDefault("poll-sec", "5"));
-        boolean encrypt = Boolean.parseBoolean(a.getOrDefault("encrypt", "false"));
+        long paceMs = Long.parseLong(a.getOrDefault("pace-ms", "0"));
         int groupSize = Integer.parseInt(a.getOrDefault("group-size", "0"));
         int groupMessages = Integer.parseInt(a.getOrDefault("group-messages", "5"));
         int restartUser = Integer.parseInt(a.getOrDefault("restart-user", "-1"));
-        if (groupSize > 0 && (!encrypt || groupSize < 2 || groupSize > users)) {
-            throw new IllegalArgumentException("--group-size needs --encrypt true and 2 <= size <= users");
+        if (groupSize > 0 && (groupSize < 2 || groupSize > users)) {
+            throw new IllegalArgumentException("--group-size needs 2 <= size <= users");
         }
-        if (restartUser >= users || (restartUser >= 0 && (!encrypt || users < 2))) {
-            throw new IllegalArgumentException("--restart-user needs --encrypt true and a valid user index");
+        if (restartUser >= users || (restartUser >= 0 && users < 2)) {
+            throw new IllegalArgumentException("--restart-user needs a valid user index");
         }
 
+        NomadEngine.Config cfg = new NomadEngine.Config(pollSec * 1000L, 30_000, paceMs, 500, 5_000);
         Stats stats = new Stats();
-        HttpClient http = HttpClient.newHttpClient();
         List<SimUser> list = new ArrayList<>();
         for (int i = 0; i < users; i++) {
-            list.add(new SimUser("u" + i, urls[i % urls.length].trim(), stats, encrypt));
+            list.add(new SimUser("u" + i, urls[i % urls.length].trim(), stats, cfg));
         }
-        list.forEach(u -> u.connect(http));
+        list.forEach(SimUser::connect);
         CompletableFuture.allOf(list.stream().map(u -> u.ready).toArray(CompletableFuture[]::new))
                 .get(15, TimeUnit.SECONDS);
         CompletableFuture.allOf(list.stream().map(u -> u.published).toArray(CompletableFuture[]::new))
                 .get(15, TimeUnit.SECONDS);
-        System.out.printf("connected %d users to %d node(s), poll-sec=%d, encrypt=%s, group-size=%d, restart-user=%d%n",
-                users, urls.length, pollSec, encrypt, groupSize, restartUser);
-
-        ScheduledExecutorService timer = Executors.newSingleThreadScheduledExecutor(r -> {
-            Thread t = new Thread(r, "sim-timer");
-            t.setDaemon(true);
-            return t;
-        });
-        if (pollSec > 0) {
-            timer.scheduleAtFixedRate(() -> list.forEach(SimUser::syncNow), pollSec, pollSec, TimeUnit.SECONDS);
-        }
-        timer.scheduleAtFixedRate(() -> list.forEach(SimUser::ping), 30, 30, TimeUnit.SECONDS);
+        System.out.printf("connected %d users to %d node(s), poll-sec=%d, pace-ms=%d, group-size=%d, restart-user=%d%n",
+                users, urls.length, pollSec, paceMs, groupSize, restartUser);
 
         Map<String, Integer> expectedIn = new HashMap<>();
         List<CompletableFuture<Void>> pending = new ArrayList<>();
@@ -107,9 +97,9 @@ public final class Main {
             CompletableFuture.allOf(pending.toArray(CompletableFuture[]::new)).get(60, TimeUnit.SECONDS);
             Thread.sleep(1500);
 
-            SimUser restarted = new SimUser(old.name, old.url, stats, ClientState.open(masterKey, saved));
+            SimUser restarted = new SimUser(old.name, old.url, stats, cfg, ClientState.open(masterKey, saved));
             list.set(restartUser, restarted);
-            restarted.connect(http);
+            restarted.connect();
             restarted.ready.get(15, TimeUnit.SECONDS);
             System.out.printf("u%d is back (uid unchanged: %s)%n", restartUser, restarted.uid().equals(old.uid()));
 
@@ -121,26 +111,29 @@ public final class Main {
                         expectedIn);
             }
             CompletableFuture.allOf(pending.toArray(CompletableFuture[]::new)).get(60, TimeUnit.SECONDS);
-            restartedFetches = restarted.bundleFetches.get();
+            restartedFetches = restarted.bundleRequests();
         }
 
         waitDelivered(stats, expected, timeoutSec);
+        long settleUntil = System.nanoTime() + Duration.ofSeconds(5).toNanos();
+        while (list.stream().mapToInt(SimUser::unacknowledgedSends).sum() > 0 && System.nanoTime() < settleUntil) {
+            Thread.sleep(50);
+        }
         double seconds = (System.nanoTime() - started) / 1e9;
         stats.undecryptable.set(list.stream().mapToInt(SimUser::heldCount).sum());
         int unacked = list.stream().mapToInt(SimUser::unacknowledgedSends).sum();
+        int rateLimited = list.stream().mapToInt(SimUser::rateLimited).sum();
 
-        System.out.printf("expected=%d delivered=%d duplicates=%d sendAcks=%d errors=%d foreign=%d "
+        System.out.printf("expected=%d delivered=%d duplicates=%d errors=%d foreign=%d "
                         + "stillHeldUndecryptable=%d rateLimited=%d unackedSends=%d%n",
-                expected, stats.delivered.get(), stats.duplicates.get(), stats.sendAcks.get(),
-                stats.errors.get(), stats.foreign.get(), stats.undecryptable.get(),
-                stats.rateLimited.get(), unacked);
+                expected, stats.delivered.get(), stats.duplicates.get(), stats.errors.get(), stats.foreign.get(),
+                stats.undecryptable.get(), rateLimited, unacked);
         System.out.printf("latency ms: p50=%d p95=%d max=%d  total=%.2fs%n",
                 stats.percentile(0.50), stats.percentile(0.95), stats.percentile(1.0), seconds);
-        System.out.println("per user (name, node, expected incoming, got since (re)start, connection state):");
+        System.out.println("per user (name, node, expected incoming, got since (re)start, connection):");
         for (SimUser u : list) {
             System.out.printf("  %s %s in=%d got=%d %s%n", u.name, u.url,
-                    expectedIn.getOrDefault(u.name, 0), u.received.get(),
-                    u.closedInfo == null ? "open" : u.closedInfo);
+                    expectedIn.getOrDefault(u.name, 0), u.received.get(), u.connectionState());
         }
         boolean knewEveryone = messages >= users - 1;
         boolean restartOk = restartedFetches <= 0 || !knewEveryone;
@@ -149,9 +142,8 @@ public final class Main {
                     restartedFetches);
         }
         list.forEach(SimUser::close);
-        Thread.sleep(300);
         boolean ok = stats.delivered.get() == expected && stats.duplicates.get() == 0
-                && stats.errors.get() == 0 && stats.undecryptable.get() == 0 && restartOk;
+                && stats.errors.get() == 0 && stats.undecryptable.get() == 0 && unacked == 0 && restartOk;
         System.out.println(ok ? "RESULT: OK" : "RESULT: FAIL");
         System.exit(ok ? 0 : 1);
     }
@@ -211,9 +203,8 @@ public final class Main {
             Thread.sleep(100);
             if (System.nanoTime() - lastPrint > 2_000_000_000L) {
                 lastPrint = System.nanoTime();
-                System.out.printf("  t=%.1fs delivered=%d/%d sendAcks=%d rateLimited=%d%n",
-                        (System.nanoTime() - started) / 1e9, stats.delivered.get(), expected,
-                        stats.sendAcks.get(), stats.rateLimited.get());
+                System.out.printf("  t=%.1fs delivered=%d/%d%n",
+                        (System.nanoTime() - started) / 1e9, stats.delivered.get(), expected);
             }
         }
     }

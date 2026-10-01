@@ -4,14 +4,15 @@ import android.content.Context
 import java.io.File
 import org.nomad.client.ClientState
 import org.nomad.client.FileStateStore
+import org.nomad.client.Persistence
 import org.nomad.client.StateStore
 import org.nomad.core.DeviceAuth
 import org.nomad.crypto.ConversationManager
 
 /**
- * The client state on disk. The two functions below are the only way the app should use the sessions, because they
- * keep the rule of docs/state.md: the state is saved BEFORE a ciphertext is handed out for sending and after every
- * message that changed a session.
+ * The client state on disk. The engine (NomadEngine) keeps the rules of docs/state.md by itself and only needs
+ * [persistence]. The two functions encryptFor and decrypt are for code that uses the sessions directly (the
+ * self-test): they save BEFORE a ciphertext is handed out and after every message that changed a session.
  */
 class StateRepository private constructor(
     private val store: StateStore,
@@ -19,6 +20,9 @@ class StateRepository private constructor(
     val state: ClientState,
     val loadedFromDisk: Boolean,
 ) {
+    /** What NomadEngine calls to write the state. */
+    val persistence: Persistence = Persistence { save() }
+
     @Synchronized
     fun save() {
         state.save(store, masterKey)
@@ -32,7 +36,7 @@ class StateRepository private constructor(
         return wire
     }
 
-    /** Decrypts and saves; only after this returns may the message be acknowledged to the node. */
+    /** Decrypts and saves; only after this returns may the caller acknowledge the message. */
     @Synchronized
     fun decrypt(wire: ByteArray): ConversationManager.Decrypted? {
         val result = state.conversations.decrypt(wire)

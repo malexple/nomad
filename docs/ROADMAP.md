@@ -4,25 +4,26 @@ Principle: small steps, every step ends with a check that anyone can repeat.
 Priority = value for the family MVP divided by risk. Servers in RU are not chosen yet, so local work
 (keys, encryption, groups, Android) goes before deployment.
 
-| # | Step | Status            | Acceptance check |
-|---|---|-------------------|---|
-| 0 | Skeleton, REST, mailbox | done              | `./gradlew test` is green |
-| 1 | Netty WebSocket gateway, RedisWakeBus, simulator | done              | see "Results" |
-| 4 | Prekey directory over WebSocket, PostgreSQL and in-memory | done              | encrypted simulator works across two nodes |
-| 5 | E2EE 1:1: X3DH + Double Ratchet behind `E2eeSession` | done              | tests green, `--encrypt true` OK on 1 and 2 nodes |
-| 6 | Groups: Sender Keys, admin-only membership, signed messages, rotation | done              | `GroupManagerTest` green; `--group-size 5` OK on two nodes |
-| 7 | Limits (token bucket per device, prekey lookups per target), padding | done              | load run `--messages 200`: `RESULT: OK`, `rateLimited` > 0 |
-| 8.0 | Portability of the shared modules | done              | tests green; simulator unchanged |
-| 8.1 | State persistence (docs/state.md): binary format, `StateVault`, `StateStore`, `ClientState` | done              | `--restart-user 2` run: 160/160, 0 bundles fetched after restart |
-| 8.2 | Android project (docs/android.md): shared modules compiled into the app, Keystore master key, encrypted state file, save-before-send / save-before-ack, on-device self-test | done              | `DeviceCryptoTest` passes on the phone; the screen shows "state restored from disk" after the app is killed and started again |
-| 8.3 | Client engine shared by the simulator and the app (connection, sync, send, hold and retry, acknowledgements after saving), first real screens (Compose): contacts by invitation, chats, group chat, foreground connection | next              | phone to simulator user and back, offline delivery after reconnect |
+| # | Step | Status | Acceptance check |
+|---|---|---|---|
+| 0 | Skeleton, REST, mailbox | done | `./gradlew test` is green |
+| 1 | Netty WebSocket gateway, RedisWakeBus, simulator | done | see "Results" |
+| 4 | Prekey directory over WebSocket, PostgreSQL and in-memory | done | encrypted simulator works across two nodes |
+| 5 | E2EE 1:1: X3DH + Double Ratchet behind `E2eeSession` | done | tests green, simulator OK on 1 and 2 nodes |
+| 6 | Groups: Sender Keys, admin-only membership, signed messages, rotation | done | `GroupManagerTest` green; `--group-size 5` OK on two nodes |
+| 7 | Limits (token bucket per device, prekey lookups per target), padding | done | load run `--messages 200`: `RESULT: OK`, `rateLimited` > 0 |
+| 8.0 | Portability of the shared modules | done | tests green; simulator unchanged |
+| 8.1 | State persistence (docs/state.md) | done | `--restart-user 2` run: 160/160, 0 bundles fetched after restart |
+| 8.2 | Android project (docs/android.md): Keystore master key, encrypted state file, on-device self-test | done | `DeviceCryptoTest` 2/2 on Galaxy Note 10 (Android 12); self-test screen 5 x PASS |
+| 8.3a | Client engine `NomadEngine` in client-core (docs/engine.md); the simulator rewritten on top of it; `OkHttpTransport` for Android | in progress | `NomadEngineTest` green; all simulator checks (2 nodes, group, restart, load) give `RESULT: OK` on the engine |
+| 8.3b | First screens (Compose, Russian): identity and invitation link, adding a contact by link, chat list, chat, group creation; connection while the app is open | next | phone to simulator user and back over the home Wi-Fi, offline delivery after reconnect |
 | 2 | Deploy a node: Dockerfile, compose, TLS via reverse proxy, WireGuard between servers | waits for servers | simulator from a laptop against the public address is OK |
 | 3 | PostgreSQL replication and a failover drill (docs/failover.md) | waits for servers | kill the primary, promote, epoch+1, the simulator recovers |
-| 9 | Push relay (RuStore/APNs/UnifiedPush) with push_id | planned           | message arrives with the app killed, the provider payload is empty |
-| 10 | Media and voice: encrypted blobs with TTL | planned           | 5 MB file goes through, the node stores an opaque blob |
-| 11 | Modes "Simple" and "Guardian", first client analyzer | planned           | parent sees a signal without the message text |
-| 12 | Transport plugins and bridges | planned           | switching transport by probe(), tested with a blocked port |
-| 13 | Transparency log and witnesses | later             | needed only with outside users |
+| 9 | Push relay (RuStore/APNs/UnifiedPush) with push_id, background connection | planned | message arrives with the app killed, the provider payload is empty |
+| 10 | Media and voice: encrypted blobs with TTL | planned | 5 MB file goes through, the node stores an opaque blob |
+| 11 | Modes "Simple" and "Guardian", first client analyzer | planned | parent sees a signal without the message text |
+| 12 | Transport plugins and bridges | planned | switching transport by probe(), tested with a blocked port |
+| 13 | Transparency log and witnesses | later | needed only with outside users |
 
 ## Decisions
 - Two separate key pairs per device: Ed25519 (identity, signing, uid) and X25519 (identity for X3DH).
@@ -39,16 +40,19 @@ Priority = value for the family MVP divided by risk. Servers in RU are not chose
 - The client state is one sealed blob (docs/state.md); no SQLCipher. Invariants: save before send, save before acknowledging.
 - Android (docs/android.md): a separate Gradle build in `android/`; the shared modules are compiled into the app from their
   source folders; minSdk 30 (Android 11); the master key of the state file is wrapped by the Android Keystore; no backup.
-- MLS stays possible later: the scheme version is in the envelope (`v`): 0 = dev plaintext, 1 = X3DH + Double Ratchet,
-  2 = group message (Sender Keys).
+- One client engine (docs/engine.md): a single thread, a tiny `Transport` interface, an outbox that is part of the saved state.
+  The plaintext scheme v0 is gone: everything is encrypted.
+- Invitations: a link that carries the node address and the public signing key; shown as text and as QR (scanning later).
+- The app is in Russian; the connection lives while the app is open (background work comes with push, step 9).
+- MLS stays possible later: the scheme version is in the envelope (`v`): 1 = X3DH + Double Ratchet, 2 = group message (Sender Keys).
 
 ## Results
 - Step 1 (local, two nodes, PostgreSQL, Redis): 300/300 with wake only; Redis outage drills OK; a node starts without Redis.
 - Steps 4 and 5: 6 users on two nodes, 120/120 encrypted, `undecryptable=0`.
 - Step 6: 6 users, group of 5, 260/260 on two nodes; nothing held at the end.
 - Step 7: normal run 160/160 with `rateLimited=0`; load runs 1200/1200 and 1300/1300 with about 870-890 refusals.
-- Step 8.1: 4 users, group of 4, user 2 killed and restarted from its saved state in the middle of the run: 160/160,
-  uid unchanged, 0 prekey bundles fetched after the restart.
+- Step 8.1: user 2 killed and restarted from its saved state in the middle of the run: 160/160, 0 bundles fetched after the restart.
+- Step 8.2: Galaxy Note 10 (SM-N971N, Android 12): 2/2 instrumented tests, self-test screen all PASS (9, 8, 122, 68 ms).
 
 ## Known gaps
 - The sender id is not hidden from the recipient's node in the initial pairwise header (sealed sender is later).

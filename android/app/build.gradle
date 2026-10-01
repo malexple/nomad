@@ -46,6 +46,7 @@ android {
 dependencies {
     implementation 'org.bouncycastle:bcprov-jdk18on:1.78.1'
     implementation 'com.fasterxml.jackson.core:jackson-databind:2.17.2'
+    implementation 'com.squareup.okhttp3:okhttp:4.12.0'
 
     implementation 'androidx.core:core-ktx:1.15.0'
     implementation 'androidx.activity:activity-compose:1.9.3'

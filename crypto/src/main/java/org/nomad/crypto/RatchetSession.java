@@ -16,12 +16,19 @@ final class RatchetSession implements E2eeSession {
     static final byte TYPE_NORMAL = 2;
 
     private final String peerUid;
+    private final byte[] peerSigKey;
     private final DoubleRatchet ratchet;
     private final byte[] handshakeId;
     private byte[] pendingInitialHeader;
 
-    private RatchetSession(String peerUid, DoubleRatchet ratchet, byte[] handshakeId, byte[] pendingInitialHeader) {
+    private RatchetSession(
+            String peerUid,
+            byte[] peerSigKey,
+            DoubleRatchet ratchet,
+            byte[] handshakeId,
+            byte[] pendingInitialHeader) {
         this.peerUid = peerUid;
+        this.peerSigKey = peerSigKey;
         this.ratchet = ratchet;
         this.handshakeId = handshakeId;
         this.pendingInitialHeader = pendingInitialHeader;
@@ -32,17 +39,21 @@ final class RatchetSession implements E2eeSession {
         DoubleRatchet dr = DoubleRatchet.initAlice(r.sk(), peer.spk(), r.ad());
         InitialHeader h = new InitialHeader(
                 me.sigPub(), me.identityDhPub(), me.sigIkDh(), r.ek(), r.spkId(), r.opkId());
-        return new RatchetSession(peer.uid(), dr, r.ek(), h.encode());
+        return new RatchetSession(peer.uid(), peer.sigKey().clone(), dr, r.ek(), h.encode());
     }
 
     static RatchetSession accept(Identity me, InitialHeader h) {
         X3dh.ResponderResult r = X3dh.respond(me, h);
         DoubleRatchet dr = DoubleRatchet.initBob(r.sk(), r.spk(), r.ad());
-        return new RatchetSession(Ids.uid(h.sigKeyA()), dr, h.ekA(), null);
+        return new RatchetSession(Ids.uid(h.sigKeyA()), h.sigKeyA().clone(), dr, h.ekA(), null);
     }
 
     String peerUid() {
         return peerUid;
+    }
+
+    byte[] peerSigKey() {
+        return peerSigKey;
     }
 
     boolean matchesHandshake(byte[] ek) {
@@ -89,14 +100,15 @@ final class RatchetSession implements E2eeSession {
     // ---------------------------------------------------------------- persistence
 
     synchronized void writeTo(BinWriter w) {
-        w.str(peerUid).bytes(handshakeId).nullableBytes(pendingInitialHeader);
+        w.str(peerUid).bytes(peerSigKey).bytes(handshakeId).nullableBytes(pendingInitialHeader);
         ratchet.writeTo(w);
     }
 
     static RatchetSession readFrom(BinReader r) {
         String peer = r.str();
+        byte[] sigKey = r.bytes();
         byte[] handshake = r.bytes();
         byte[] pending = r.nullableBytes();
-        return new RatchetSession(peer, DoubleRatchet.readFrom(r), handshake, pending);
+        return new RatchetSession(peer, sigKey, DoubleRatchet.readFrom(r), handshake, pending);
     }
 }

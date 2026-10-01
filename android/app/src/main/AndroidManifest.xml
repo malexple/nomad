@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <uses-permission android:name="android.permission.INTERNET" />
+
     <!--
         allowBackup is off on purpose: the state file is useless without the Keystore key of THIS device,
         and a restored backup would look like a lost identity.

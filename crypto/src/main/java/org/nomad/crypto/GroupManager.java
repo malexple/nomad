@@ -68,6 +68,9 @@ public final class GroupManager {
 
     public record GroupDecrypted(String groupId, String senderUid, byte[] plaintext) {}
 
+    /** For the user interface: members include this device and the admin. */
+    public record GroupInfo(String groupId, String adminUid, int generation, List<GroupMember> members) {}
+
     private static final class SenderChain {
         final byte[] chainId;
         byte[] ck;
@@ -379,6 +382,19 @@ public final class GroupManager {
     public synchronized boolean canSend(String groupId) {
         Group g = groups.get(groupId);
         return g != null && g.mine != null;
+    }
+
+    /** The groups this device belongs to, for the user interface. */
+    public synchronized List<GroupInfo> listGroups() {
+        List<GroupInfo> out = new ArrayList<>();
+        for (Group g : groups.values()) {
+            List<GroupMember> members = new ArrayList<>();
+            for (byte[] key : g.members.values()) {
+                members.add(new GroupMember(key));
+            }
+            out.add(new GroupInfo(g.groupHex, g.adminUid, g.generation, members));
+        }
+        return out;
     }
 
     /** True when the chains of all other members of the current generation are known. */
